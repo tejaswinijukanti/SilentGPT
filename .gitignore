@@ -44,3 +44,6 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Auto-push helper (local only)
+auto_push.ps1
