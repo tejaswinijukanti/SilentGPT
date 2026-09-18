@@ -1,0 +1,24 @@
+# SilentGPT Backend — Python Dependencies
+# Install with: pip install -r requirements.txt
+# Tested with Python 3.11 – 3.14
+
+# ── Web Framework ──────────────────────────────────────────────
+fastapi>=0.115.5
+uvicorn[standard]>=0.32.1           # ASGI server
+
+# ── HTTP Client (async) ────────────────────────────────────────
+httpx>=0.28.0                       # Ollama, Tavily, Serper API calls
+
+# ── Settings / Environment ─────────────────────────────────────
+# pydantic >=2.11 ships pydantic-core >=2.27 which uses PyO3 0.23+
+# (PyO3 0.23+ supports Python 3.14)
+pydantic>=2.11.0
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.1
+
+# ── File Uploads ───────────────────────────────────────────────
+python-multipart>=0.0.12            # Required for FastAPI UploadFile / Form
+
+# ── Image Processing ───────────────────────────────────────────
+# Pillow >=11.1.0 added Python 3.14 pre-built Windows wheels
+Pillow>=11.1.0

@@ -1,0 +1,37 @@
+services:
+  # ── Backend: FastAPI Application ───────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: silentgpt-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      # Points to Ollama running on your host machine (Windows/Mac/Linux)
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      # Allows container to reach host services (like Ollama on 11434)
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./backend/.env
+        required: false
+    restart: unless-stopped
+    volumes:
+      - ./backend:/app
+
+  # ── Frontend: Web UI via lightweight Nginx ─────────────────────────────────
+  frontend:
+    image: nginx:alpine
+    container_name: silentgpt-frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./style.css:/usr/share/nginx/html/style.css:ro
+      - ./app.js:/usr/share/nginx/html/app.js:ro
+    depends_on:
+      - backend
+    restart: unless-stopped

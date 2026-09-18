@@ -1,0 +1,698 @@
+/* ==========================================
+   SilentGPT — app.js
+   All animations, chat logic, canvas effects
+   ========================================== */
+
+"use strict";
+
+/* ---- API CONFIG ---- */
+const API_BASE = (window.location.protocol.startsWith("http") && window.location.port === "8000")
+  ? ""
+  : "http://localhost:8000";
+
+/* ---- STATE ---- */
+const state = {
+  chatOpen: false,
+  messages: [],
+  pendingImage: null,
+  pendingImageFile: null,
+  isResponding: false,
+  chatHistory: [],
+  activeChatId: null,
+};
+
+/* ==========================================
+   MATRIX RAIN CANVAS
+   ========================================== */
+(function initMatrix() {
+  const canvas = document.getElementById("matrix-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  let cols = 0, drops = [];
+
+  const CHARS = "01アイウエオカキクケコサシスセソタチツテトナニヌネノ";
+  const FONT_SIZE = 13;
+  const COLORS = ["rgba(168,85,247,", "rgba(99,102,241,", "rgba(232,121,249,"];
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    cols = Math.floor(canvas.width / FONT_SIZE);
+    drops = Array.from({ length: cols }, () => Math.random() * -100);
+  }
+
+  function draw() {
+    ctx.fillStyle = "rgba(5,5,8,0.05)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = `${FONT_SIZE}px monospace`;
+    for (let i = 0; i < cols; i++) {
+      const char = CHARS[Math.floor(Math.random() * CHARS.length)];
+      const colorBase = COLORS[i % COLORS.length];
+      const alpha = Math.random() * 0.3 + 0.03;
+      ctx.fillStyle = `${colorBase}${alpha})`;
+      ctx.fillText(char, i * FONT_SIZE, drops[i] * FONT_SIZE);
+      if (drops[i] * FONT_SIZE > canvas.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i]++;
+    }
+  }
+
+  resize();
+  window.addEventListener("resize", resize);
+  setInterval(draw, 60);
+})();
+
+/* ==========================================
+   FLUID WAVE CANVAS
+   ========================================== */
+(function initWave() {
+  const canvas = document.getElementById("wave-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  let width, height, t = 0;
+  let mouseX = 0.5, mouseY = 0.5;
+  let targetMouseX = 0.5, targetMouseY = 0.5;
+
+  function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+  }
+
+  document.addEventListener("mousemove", (e) => {
+    targetMouseX = e.clientX / window.innerWidth;
+    targetMouseY = e.clientY / window.innerHeight;
+  });
+
+  function drawOrb(cx, cy, r, r1, g1, b1, alpha) {
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    grad.addColorStop(0, `rgba(${r1},${g1},${b1},${alpha})`);
+    grad.addColorStop(0.5, `rgba(${r1},${g1},${b1},${alpha * 0.35})`);
+    grad.addColorStop(1, `rgba(${r1},${g1},${b1},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawWave(yBase, amplitude, frequency, speed, r1, g1, b1, alpha, lineWidth) {
+    ctx.beginPath();
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = `rgba(${r1},${g1},${b1},${alpha})`;
+    for (let x = 0; x <= width; x += 2) {
+      const xNorm = x / width;
+      const y = yBase
+        + Math.sin(xNorm * frequency * Math.PI + t * speed) * amplitude
+        + Math.sin(xNorm * (frequency * 1.7) * Math.PI + t * (speed * 0.7) + 1) * (amplitude * 0.35)
+        + Math.sin(xNorm * (frequency * 0.5) * Math.PI + t * (speed * 1.3) + 2.5) * (amplitude * 0.2)
+        + (mouseY - 0.5) * amplitude * 0.4;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    t += 0.007;
+    mouseX += (targetMouseX - mouseX) * 0.04;
+    mouseY += (targetMouseY - mouseY) * 0.04;
+
+    const cx = width * (0.25 + mouseX * 0.5);
+    const cy = height * (0.25 + mouseY * 0.5);
+    drawOrb(cx, cy, width * 0.38, 168, 85, 247, 0.09);
+    drawOrb(width * 0.72 + Math.sin(t * 0.4) * 40, height * 0.38 + Math.cos(t * 0.3) * 30, width * 0.3, 99, 102, 241, 0.07);
+    drawOrb(width * 0.5 + Math.cos(t * 0.5) * 50, height * 0.6 + Math.sin(t * 0.35) * 25, width * 0.22, 232, 121, 249, 0.05);
+    drawOrb(width * 0.15 + Math.sin(t * 0.6) * 30, height * 0.7, width * 0.18, 168, 85, 247, 0.04);
+
+    const midY = height * 0.5;
+    drawWave(midY,      60, 2.5, 0.65, 168, 85,  247, 0.13, 1.8);
+    drawWave(midY + 15, 48, 3.2, 0.50, 99,  102, 241, 0.10, 1.3);
+    drawWave(midY - 20, 70, 2.0, 0.85, 232, 121, 249, 0.08, 1.1);
+    drawWave(midY + 35, 38, 4.0, 0.38, 168, 85,  247, 0.06, 0.9);
+    drawWave(midY - 40, 30, 5.0, 0.28, 99,  102, 241, 0.05, 0.7);
+
+    const gl = ctx.createRadialGradient(width / 2, midY, 0, width / 2, midY, Math.min(width, height) * 0.55);
+    gl.addColorStop(0, "rgba(168,85,247,0.04)");
+    gl.addColorStop(0.5, "rgba(99,102,241,0.02)");
+    gl.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = gl;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  resize();
+  window.addEventListener("resize", resize);
+  function loop() { draw(); requestAnimationFrame(loop); }
+  loop();
+})();
+
+/* ==========================================
+   NAVBAR
+   ========================================== */
+(function initNavbar() {
+  const nav = document.getElementById("navbar");
+  const hamburger = document.getElementById("nav-hamburger");
+  const navLinks = document.getElementById("nav-links");
+
+  window.addEventListener("scroll", () => {
+    if (window.scrollY > 30) nav.classList.add("scrolled");
+    else nav.classList.remove("scrolled");
+  }, { passive: true });
+
+  if (hamburger) {
+    hamburger.addEventListener("click", () => {
+      const isOpen = navLinks.classList.toggle("open");
+      hamburger.setAttribute("aria-expanded", isOpen);
+    });
+  }
+
+  navLinks && navLinks.querySelectorAll(".nav-link").forEach(link => {
+    link.addEventListener("click", () => {
+      navLinks.classList.remove("open");
+      hamburger && hamburger.setAttribute("aria-expanded", "false");
+    });
+  });
+})();
+
+/* ==========================================
+   SCROLL REVEAL
+   ========================================== */
+(function initScrollReveal() {
+  const elements = document.querySelectorAll("[data-animate]");
+  if (!elements.length) return;
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) { entry.target.classList.add("visible"); observer.unobserve(entry.target); }
+    });
+  }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+  elements.forEach(el => observer.observe(el));
+})();
+
+/* ==========================================
+   CHAT HISTORY HELPERS
+   ========================================== */
+function genId() { return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`; }
+
+function getConversationTitle(messages) {
+  const firstUser = messages.find(m => m.role === "user");
+  if (!firstUser || !firstUser.text) return "New conversation";
+  const t = firstUser.text.trim();
+  return t.length > 42 ? t.slice(0, 42) + "\u2026" : t;
+}
+
+function saveCurrentToHistory() {
+  if (state.messages.length === 0) return;
+  const title = getConversationTitle(state.messages);
+  if (state.activeChatId) {
+    const existing = state.chatHistory.find(c => c.id === state.activeChatId);
+    if (existing) { existing.messages = [...state.messages]; existing.title = title; renderSidebarHistory(); return; }
+  }
+  const entry = { id: genId(), title, messages: [...state.messages], timestamp: Date.now() };
+  state.chatHistory.unshift(entry);
+  state.activeChatId = entry.id;
+  renderSidebarHistory();
+}
+
+function renderSidebarHistory() {
+  const container = document.getElementById("sidebar-history");
+  if (!container) return;
+  if (state.chatHistory.length === 0) {
+    container.innerHTML = `<div class="sidebar-history-empty">No recent chats</div>`;
+    return;
+  }
+  container.innerHTML = state.chatHistory.map(chat => `
+    <div class="sidebar-history-item ${chat.id === state.activeChatId ? "active" : ""}"
+         data-chat-id="${escAttr(chat.id)}"
+         onclick="loadChat('${escAttr(chat.id)}')"
+         title="${escAttr(chat.title)}">
+      <svg class="history-icon" width="11" height="11" viewBox="0 0 24 24" fill="none">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="history-title">${escHtml(chat.title)}</span>
+      <button class="history-delete-btn" onclick="deleteHistoryChat(event,'${escAttr(chat.id)}')" title="Delete" aria-label="Delete chat">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  `).join("");
+}
+
+function loadChat(chatId) {
+  saveCurrentToHistory();
+  const chat = state.chatHistory.find(c => c.id === chatId);
+  if (!chat) return;
+  state.messages = [...chat.messages];
+  state.activeChatId = chatId;
+  state.pendingImage = null;
+  const container = document.getElementById("chat-messages");
+  if (!container) return;
+  container.innerHTML = "";
+  state.messages.forEach(msg => appendMessage(msg, false));
+  scrollToBottom();
+  document.querySelectorAll(".sidebar-history-item").forEach(el => {
+    el.classList.toggle("active", el.dataset.chatId === chatId);
+  });
+}
+
+function deleteHistoryChat(e, chatId) {
+  e.stopPropagation();
+  state.chatHistory = state.chatHistory.filter(c => c.id !== chatId);
+  if (state.activeChatId === chatId) { state.messages = []; state.activeChatId = null; renderWelcome(); }
+  renderSidebarHistory();
+}
+
+/* ==========================================
+   CHAT OPEN / CLOSE / NEW
+   ========================================== */
+function openChat() {
+  state.chatOpen = true;
+  const section = document.getElementById("chat-section");
+  document.body.classList.add("chat-lock");
+  section.classList.remove("chat-hidden");
+  section.classList.add("chat-visible");
+  if (state.messages.length === 0) renderWelcome();
+  setTimeout(() => { const input = document.getElementById("chat-input"); if (input) input.focus(); }, 400);
+}
+
+function closeChat() {
+  saveCurrentToHistory();
+  state.chatOpen = false;
+  const section = document.getElementById("chat-section");
+  document.body.classList.remove("chat-lock");
+  section.classList.add("chat-hidden");
+  section.classList.remove("chat-visible");
+}
+
+function newChat() {
+  saveCurrentToHistory();
+  state.messages = []; state.activeChatId = null; state.pendingImage = null;
+  const previewContainer = document.getElementById("image-preview-container");
+  if (previewContainer) previewContainer.innerHTML = "";
+  renderWelcome();
+  setTimeout(() => { const input = document.getElementById("chat-input"); if (input) input.focus(); }, 200);
+}
+
+function clearChat() {
+  // Clear ALL history and current chat
+  state.chatHistory = [];
+  state.messages = [];
+  state.activeChatId = null;
+  state.pendingImage = null;
+  const previewContainer = document.getElementById("image-preview-container");
+  if (previewContainer) previewContainer.innerHTML = "";
+  renderSidebarHistory();
+  renderWelcome();
+}
+
+/* ==========================================
+   RENDER WELCOME
+   ========================================== */
+function renderWelcome() {
+  const messagesEl = document.getElementById("chat-messages");
+  if (!messagesEl) return;
+  const suggestions = [
+    "What happened in the news today?",
+    "Explain quantum computing simply",
+    "What are the latest AI developments?",
+    "How does blockchain work?",
+  ];
+  messagesEl.innerHTML = `
+    <div class="chat-welcome" id="chat-welcome">
+      <div class="chat-welcome-orb">
+        <div class="chat-welcome-orb-ring"></div>
+        <div class="chat-welcome-orb-ring2"></div>
+        <div class="chat-welcome-icon-inner">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="url(#wg)" stroke-width="1.4"/>
+            <path d="M7.5 14 Q9.5 9 12 14 Q14.5 19 16.5 14" stroke="url(#wg)" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <defs><linearGradient id="wg" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse"><stop stop-color="#c084fc"/><stop offset="1" stop-color="#e879f9"/></linearGradient></defs>
+          </svg>
+        </div>
+      </div>
+      <h2 class="chat-welcome-title">How can I help you?</h2>
+      <p class="chat-welcome-sub">Ask anything — I search the live web for answers and forget everything the moment I respond.</p>
+      <div class="chat-welcome-suggestions">
+        ${suggestions.map(s => `<button class="suggestion-chip" onclick="useSuggestion(this)">${escHtml(s)}</button>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function useSuggestion(btn) {
+  const input = document.getElementById("chat-input");
+  if (input) { input.value = btn.textContent; input.focus(); autoResize(input); }
+}
+
+/* ==========================================
+   SEND MESSAGE — Connected to POST /chat
+   ========================================== */
+async function sendMessage() {
+  // Block concurrent requests
+  if (state.isResponding) return;
+
+  const input = document.getElementById("chat-input");
+  const text = (input ? input.value.trim() : "");
+  const image = state.pendingImage;
+  const imageFile = state.pendingImageFile;
+  if (!text && !image) return;
+
+  // Clear input field and image preview
+  if (input) { input.value = ""; autoResize(input); }
+  state.pendingImage = null;
+  state.pendingImageFile = null;
+  const previewContainer = document.getElementById("image-preview-container");
+  if (previewContainer) previewContainer.innerHTML = "";
+
+  // Dismiss welcome screen
+  const welcome = document.getElementById("chat-welcome");
+  if (welcome) {
+    welcome.style.opacity = "0";
+    welcome.style.transform = "scale(0.95)";
+    welcome.style.transition = "all 0.2s";
+    setTimeout(() => welcome.remove(), 200);
+  }
+
+  // Append user message bubble
+  const userMsg = { role: "user", text, image };
+  state.messages.push(userMsg);
+  appendMessage(userMsg, true);
+  saveCurrentToHistory();
+
+  // Show thinking animation while waiting for backend
+  const typingId = showTyping();
+  state.isResponding = true;
+
+  // Disable send button during request
+  const sendBtn = document.getElementById("send-btn");
+  if (sendBtn) sendBtn.disabled = true;
+
+  let aiResponse = "";
+
+  try {
+    if (imageFile) {
+      // --- Image: POST http://localhost:8000/image (multipart) ---
+      const formData = new FormData();
+      formData.append("file", imageFile);
+      if (text) formData.append("instruction", text);
+
+      const res = await fetch(`${API_BASE}/image`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server error (${res.status})`);
+      }
+      const data = await res.json();
+      aiResponse = data.analysis || "No analysis returned.";
+
+    } else {
+      // --- Text: POST http://localhost:8000/chat (JSON) ---
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server error (${res.status})`);
+      }
+      const data = await res.json();
+      aiResponse = data.response || "No response returned.";
+
+      // Append web sources if search was configured and returned results
+      if (data.sources && data.sources.length > 0) {
+        const srcLines = data.sources
+          .map((s, i) => `${i + 1}. ${s.title} — ${s.url}`)
+          .join("\n");
+        aiResponse += `\n\nSources:\n${srcLines}`;
+      }
+    }
+
+  } catch (err) {
+    // Show error message inline in the chat
+    console.error("SilentGPT backend error:", err.message);
+    aiResponse = `Could not reach the backend.\n${err.message}\n\nMake sure the server is running:\n  uvicorn main:app --reload`;
+
+  } finally {
+    // Always remove the thinking animation and re-enable input
+    removeTyping(typingId);
+    if (sendBtn) sendBtn.disabled = false;
+  }
+
+  // Append AI reply bubble
+  const aiMsg = { role: "ai", text: aiResponse };
+  state.messages.push(aiMsg);
+  appendMessage(aiMsg, true);
+  saveCurrentToHistory();
+
+  state.isResponding = false;
+  scrollToBottom();
+}
+
+/* ==========================================
+   MESSAGE RENDERING
+   ========================================== */
+function appendMessage(msg, animate) {
+  const container = document.getElementById("chat-messages");
+  if (!container) return;
+
+  const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const isUser = msg.role === "user";
+  const el = document.createElement("div");
+  el.className = `message ${isUser ? "user" : "ai"}`;
+  if (!animate) el.style.animation = "none";
+
+  if (isUser) {
+    el.innerHTML = `
+      <div class="message-row">
+        ${msg.image ? `<img src="${escAttr(msg.image)}" class="message-image" alt="Uploaded image"/>` : ""}
+        ${msg.text ? `<div class="message-bubble">${escHtml(msg.text)}</div>` : ""}
+      </div>
+      <span class="message-time">${time}</span>
+    `;
+    container.appendChild(el);
+    scrollToBottom();
+  } else {
+    const avatarUid = `av-${Date.now()}`;
+    el.innerHTML = `
+      <div class="message-row">
+        ${animate ? makeAvatarHTML('done', avatarUid) : makeAvatarHTML('default', avatarUid)}
+        <div class="message-bubble" id="ai-b-${Date.now()}"></div>
+      </div>
+      <span class="message-time">${time}</span>
+    `;
+    container.appendChild(el);
+    scrollToBottom();
+    const bubble = el.querySelector(".message-bubble");
+    if (bubble) {
+      if (animate) typewriterEffect(bubble, msg.text);
+      else bubble.innerHTML = escHtml(msg.text);
+    }
+    // Transition: done smile → default logo after 1.7s
+    if (animate) {
+      setTimeout(() => {
+        const av = document.getElementById(avatarUid);
+        if (!av) return;
+        av.style.opacity = '0';
+        av.style.transform = 'scale(0.7)';
+        av.style.transition = 'opacity 0.22s ease, transform 0.22s ease';
+        setTimeout(() => {
+          const av2 = document.getElementById(avatarUid);
+          if (!av2) return;
+          av2.outerHTML = makeAvatarHTML('default', avatarUid + '-d');
+          const av3 = document.getElementById(avatarUid + '-d');
+          if (av3) av3.classList.add('av-fade-in');
+        }, 220);
+      }, 1700);
+    }
+    return;
+  }
+}
+
+function makeAvatarHTML(avatarState, uid) {
+  if (avatarState === 'thinking') {
+    return `<div class="ai-avatar av-thinking" id="${uid}">
+      <svg class="av-spin-arc" width="16" height="16" viewBox="0 0 32 32" fill="none">
+        <circle cx="16" cy="16" r="13" stroke="rgba(168,85,247,0.25)" stroke-width="2.5"/>
+        <path d="M16 3 A13 13 0 0 1 29 16" stroke="#c084fc" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+    </div>`;
+  }
+  if (avatarState === 'done') {
+    return `<div class="ai-avatar av-done" id="${uid}">
+      <svg width="18" height="18" viewBox="0 0 32 32" fill="none">
+        <circle cx="16" cy="16" r="13" stroke="#c084fc" stroke-width="2"/>
+        <circle class="av-eye" cx="11.5" cy="13" r="1.8" fill="#c084fc"/>
+        <circle class="av-eye av-eye-r" cx="20.5" cy="13" r="1.8" fill="#c084fc"/>
+        <path class="av-smile" d="M10 18 Q16 24.5 22 18" stroke="#e879f9" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+      </svg>
+    </div>`;
+  }
+  // default
+  return `<div class="ai-avatar" id="${uid}">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="10" stroke="#fff" stroke-width="1.5"/>
+      <path d="M8 14 Q10 10 12 14 Q14 18 16 14" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+    </svg>
+  </div>`;
+}
+
+function typewriterEffect(el, text, speed) {
+  speed = speed || 16;
+  const words = text.split(" ");
+  let i = 0;
+  el.textContent = "";
+  function writeNext() {
+    if (i < words.length) {
+      el.textContent += (i === 0 ? "" : " ") + words[i];
+      i++;
+      scrollToBottom();
+      setTimeout(writeNext, speed + Math.random() * 10);
+    }
+  }
+  writeNext();
+}
+
+function showTyping() {
+  const container = document.getElementById("chat-messages");
+  if (!container) return null;
+  const id = `typing-${Date.now()}`;
+  const el = document.createElement("div");
+  el.className = "message ai"; el.id = id;
+  el.innerHTML = `
+    <div class="message-row">
+      ${makeAvatarHTML('thinking', `av-typing-${Date.now()}`)}
+      <div class="typing-indicator">
+        <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+      </div>
+    </div>
+  `;
+  container.appendChild(el);
+  scrollToBottom();
+  return id;
+}
+
+function removeTyping(id) { if (!id) return; const el = document.getElementById(id); if (el) el.remove(); }
+function scrollToBottom() { const c = document.getElementById("chat-messages"); if (c) c.scrollTop = c.scrollHeight; }
+
+/* ==========================================
+   AI RESPONSES
+   ========================================== */
+function generateAIResponse(text, image) {
+  if (image && !text) {
+    return "I can see the image you've uploaded! I've analyzed its contents. In a live deployment, I would provide comprehensive computer vision analysis — identifying objects, text, and context. Your image data has been processed and will be permanently deleted immediately. \uD83D\uDD12 Zero retention guaranteed.";
+  }
+  const responses = [
+    `Great question! I've searched across multiple live web sources to find the most current answer.\n\nBased on the latest information: "${text.slice(0,30)}..." has rich context. Real-time data suggests significant developments in the last 24\u201348 hours. I've cross-referenced multiple high-authority sources for this synthesized answer.\n\n\uD83D\uDD12 Your query is now permanently deleted from our systems.`,
+    `I found several relevant sources on this topic.\n\nIn short: the latest on "${text.slice(0,40)}..." points to fascinating insights. Multiple trusted sources confirm the core facts, with noteworthy recent updates.\n\nFor deeper exploration, just ask!\n\n\uD83D\uDD12 Zero data retention active. Not stored, not used for training.`,
+    `Searching the live web now... \u2713\n\nHere's what I found about "${text.slice(0,35)}":\n\nThe current consensus is clear and well-supported. There's been notable expert discussion, and the latest data points to important conclusions.\n\nWant me to dive deeper?\n\n\uD83D\uDD12 Private mode: All data deleted after delivery.`,
+    `Based on my real-time internet search:\n\nYour query touches on a timely subject. Here's the synthesized answer from the most authoritative sources:\n\nKey points are well-documented by multiple independent sources. Recent developments have added new dimensions that reshape expert understanding.\n\n\uD83D\uDD12 SilentGPT guarantee: Zero data retention. This conversation never existed on our servers.`,
+  ];
+  return responses[Math.floor(Math.random() * responses.length)];
+}
+
+/* ==========================================
+   IMAGE UPLOAD
+   ========================================== */
+(function initImageUpload() {
+  const input = document.getElementById("image-upload-input");
+  if (!input) return;
+  input.addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    state.pendingImageFile = file;
+    const reader = new FileReader();
+    reader.onload = (ev) => { state.pendingImage = ev.target.result; showImagePreview(ev.target.result); };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  });
+})();
+
+function showImagePreview(src) {
+  const container = document.getElementById("image-preview-container");
+  if (!container) return;
+  container.innerHTML = `<div class="image-preview-item"><img src="${escAttr(src)}" alt="Preview"/><button class="image-preview-remove" onclick="removeImagePreview()" aria-label="Remove image">&times;</button></div>`;
+}
+
+function removeImagePreview() {
+  state.pendingImage = null;
+  state.pendingImageFile = null;
+  const container = document.getElementById("image-preview-container");
+  if (container) container.innerHTML = "";
+}
+
+/* ==========================================
+   TEXTAREA AUTO-RESIZE
+   ========================================== */
+(function initTextarea() {
+  const textarea = document.getElementById("chat-input");
+  if (!textarea) return;
+  textarea.addEventListener("input", () => autoResize(textarea));
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+})();
+
+function autoResize(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 160) + "px"; }
+
+/* ==========================================
+   UTILITIES
+   ========================================== */
+function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#039;").replace(/\n/g, "<br>");
+}
+
+function escAttr(str) { return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
+
+/* ==========================================
+   CARD PARALLAX
+   ========================================== */
+(function initCardParallax() {
+  const cards = document.querySelectorAll(".feature-card, .step-card");
+  cards.forEach(card => {
+    card.addEventListener("mousemove", (e) => {
+      const rect = card.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width - 0.5;
+      const y = (e.clientY - rect.top) / rect.height - 0.5;
+      card.style.transform = `translateY(-6px) rotateX(${-y * 5}deg) rotateY(${x * 5}deg)`;
+    });
+    card.addEventListener("mouseleave", () => { card.style.transform = ""; });
+  });
+})();
+
+/* ==========================================
+   KEYBOARD SHORTCUT
+   ========================================== */
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chatOpen) closeChat(); });
+
+/* ==========================================
+   BACKEND HEALTH CHECK
+   ========================================== */
+async function checkBackendHealth() {
+  try {
+    const res = await fetch(`${API_BASE}/health`);
+    if (res.ok) {
+      const data = await res.json();
+      console.log("SilentGPT backend status:", data);
+      if (data.ollama_connected) {
+        const statuses = document.querySelectorAll(".sidebar-status");
+        statuses.forEach(s => {
+          s.innerHTML = `<span class="sidebar-status-dot" style="background:#4ade80;box-shadow:0 0 8px #4ade80;" aria-hidden="true"></span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L8 6H4v4l-2 2 2 2v4h4l4 4 4-4h4v-4l2-2-2-2V6h-4L12 2Z" stroke="#4ade80" stroke-width="2" stroke-linejoin="round"/></svg> Ollama AI Ready`;
+        });
+      }
+    }
+  } catch (e) {
+    console.log("SilentGPT running in standalone/offline mode.");
+  }
+}
+
+/* ==========================================
+   INIT
+   ========================================== */
+renderSidebarHistory();
+checkBackendHealth();
+
+
+
