@@ -609,7 +609,21 @@ function generateAIResponse(text, image) {
 function showImagePreview(src) {
   const container = document.getElementById("image-preview-container");
   if (!container) return;
-  container.innerHTML = `<div class="image-preview-item"><img src="${escAttr(src)}" alt="Preview"/><button class="image-preview-remove" onclick="removeImagePreview()" aria-label="Remove image">&times;</button></div>`;
+  container.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:6px; width:100%;">
+      <div class="image-preview-item">
+        <img src="${escAttr(src)}" alt="Preview"/>
+        <button class="image-preview-remove" onclick="removeImagePreview()" aria-label="Remove image">&times;</button>
+      </div>
+      <div class="image-edit-options" style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <button type="button" onclick="editImage('remove_bg')">Remove Background</button>
+        <button type="button" onclick="editImage('grayscale')">Grayscale</button>
+        <button type="button" onclick="editImage('blur')">Blur</button>
+        <button type="button" onclick="editImage('sharpen')">Sharpen</button>
+        <button type="button" onclick="editImage('brightness')">Brightness</button>
+      </div>
+    </div>
+  `;
 }
 
 function removeImagePreview() {
@@ -619,6 +633,59 @@ function removeImagePreview() {
   if (container) container.innerHTML = "";
 }
 
+async function editImage(action) {
+  if (!state.pendingImageFile) {
+    alert("Please upload an image first.");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", state.pendingImageFile);
+  formData.append("action", action);
+
+  try {
+    // Show loading
+    const typingId = showTyping();
+
+    const response = await fetch(`${API_BASE}/edit-image`, {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await response.json();
+    removeTyping(typingId);
+
+    if (data.success) {
+      // Update in-memory state so subsequent edits / sends use the edited image
+      state.pendingImage = data.image;
+      const resBlob = await fetch(data.image);
+      const blob = await resBlob.blob();
+      state.pendingImageFile = new File([blob], `edited_${action}.png`, { type: "image/png" });
+
+      // Show the edited image in chat
+      const labelMsg = { role: "ai", text: `Here's the edited image (${action}):` };
+      state.messages.push(labelMsg);
+      appendMessage(labelMsg, true);
+
+      // Display the image in a separate bubble
+      const imgMsg = {
+        role: "ai",
+        text: `<img src="${escAttr(data.image)}" style="max-width:100%;border-radius:12px;margin-top:8px;" alt="Edited image"/>`
+      };
+      state.messages.push(imgMsg);
+      appendMessage(imgMsg, false);
+
+      // Refresh the preview thumbnail with the new image
+      showImagePreview(data.image);
+    } else {
+      appendMessage({ role: "ai", text: "Sorry, failed to edit the image." }, true);
+    }
+
+  } catch (error) {
+    console.error(error);
+    appendMessage({ role: "ai", text: "Error while editing the image." }, true);
+  }
+}
 /* ==========================================
    TEXTAREA AUTO-RESIZE
    ========================================== */

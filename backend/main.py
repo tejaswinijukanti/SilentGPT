@@ -14,6 +14,7 @@ Run:
 """
 
 import gc
+import base64
 import logging
 from contextlib import asynccontextmanager
 
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from config import Settings, get_settings
@@ -35,6 +36,7 @@ from search import search_web
 from ai import generate_response, analyse_image, is_ollama_healthy
 from image_handler import (
     validate_image, extract_metadata, build_fallback_description,
+    process_image,
     ImageTooLargeError, UnsupportedImageTypeError,
 )
 
@@ -299,6 +301,76 @@ async def analyse_image_endpoint(
         gc.collect()
 
     return ImageResponse(analysis=analysis, private=True)
+
+
+
+@app.post(
+    "/image/process",
+    summary="Perform image editing (remove_bg, grayscale, blur, sharpen, brightness)",
+    tags=["Image"],
+    responses={
+        200: {"content": {"image/png": {}}, "description": "Processed image binary"},
+        400: {"model": ErrorResponse, "description": "Invalid image or action"},
+        500: {"model": ErrorResponse, "description": "Processing error"},
+    },
+)
+async def process_image_endpoint(
+    file: UploadFile = File(..., description="Image file to process"),
+    action: str = Form(
+        default="remove_bg",
+        description="Action: remove_bg, grayscale, blur, sharpen, brightness",
+    ),
+):
+    """
+    Perform image editing in-memory (remove_bg, grayscale, blur, sharpen, brightness).
+    Zero Data Retention: image is never saved to disk and memory is purged after response.
+    """
+    valid_actions = {"remove_bg", "grayscale", "blur", "sharpen", "brightness"}
+    if action not in valid_actions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action '{action}'. Valid actions: {', '.join(sorted(valid_actions))}",
+        )
+
+    content_type = file.content_type or "application/octet-stream"
+    raw_bytes = await file.read()
+    output_bytes = b""
+    try:
+        validate_image(raw_bytes, content_type)
+        output_bytes = process_image(raw_bytes, action)
+    except (ImageTooLargeError, UnsupportedImageTypeError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("Image processing error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    finally:
+        del raw_bytes
+        gc.collect()
+
+    return Response(content=output_bytes, media_type="image/png")
+
+
+@app.post("/edit-image")
+async def edit_image(file: UploadFile = File(...), action: str = Form(...)):
+    image_bytes = await file.read()
+
+    try:
+        edited_bytes = process_image(image_bytes, action)
+
+        # Convert to base64 so frontend can display it
+        b64_image = base64.b64encode(edited_bytes).decode("utf-8")
+
+        return {
+            "success": True,
+            "image": f"data:image/png;base64,{b64_image}",
+            "message": f"Image edited successfully ({action})"
+        }
+
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
 # ── Global exception handler ─────────────────────────────────────────────────

@@ -13,7 +13,8 @@ Zero Data Retention:
 """
 
 import io
-from PIL import Image, ExifTags
+import base64
+from PIL import Image, ExifTags, ImageFilter, ImageEnhance
 from config import get_settings
 
 settings = get_settings()
@@ -104,3 +105,38 @@ def build_fallback_description(metadata: dict) -> str:
         f"🔒 Image has been permanently deleted from our systems."
     )
     return desc
+
+
+def process_image(image_bytes: bytes, action: str) -> bytes:
+    """
+    Perform basic image editing.
+    Actions: remove_bg, grayscale, blur, sharpen, brightness
+    """
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+
+    if action == "remove_bg":
+        try:
+            from rembg import remove
+            output = remove(image_bytes)
+            return output
+        except Exception as e:
+            raise RuntimeError(f"Background removal failed: {e}")
+
+    elif action == "grayscale":
+        img = img.convert("L").convert("RGBA")
+
+    elif action == "blur":
+        img = img.filter(ImageFilter.GaussianBlur(radius=3))
+
+    elif action == "sharpen":
+        img = img.filter(ImageFilter.SHARPEN)
+
+    elif action == "brightness":
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(1.4)  # 1.0 = original
+
+    # Convert back to bytes
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+

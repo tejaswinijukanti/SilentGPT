@@ -23,3 +23,5 @@ python-multipart>=0.0.12            # Required for FastAPI UploadFile / Form
 # ── Image Processing ───────────────────────────────────────────
 # Pillow >=11.1.0 added Python 3.14 pre-built Windows wheels
 Pillow>=11.1.0
+rembg>=2.0.85
+onnxruntime>=1.20.0
