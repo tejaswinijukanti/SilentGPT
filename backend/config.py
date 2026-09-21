@@ -4,8 +4,11 @@ All settings are loaded from environment variables (.env file).
 No secrets are hardcoded.
 """
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
 from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_FILE = Path(__file__).resolve().parent / ".env"
 
 
 class Settings(BaseSettings):
@@ -33,7 +36,11 @@ class Settings(BaseSettings):
     ZERO_DATA_RETENTION: bool = True
     LOG_USER_MESSAGES: bool = False  # must stay False for privacy
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=(_ENV_FILE, ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 @lru_cache()

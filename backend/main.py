@@ -31,7 +31,7 @@ from models import (
     HealthResponse, ErrorResponse,
     SearchSource,
 )
-from search import search_web, format_sources_for_prompt
+from search import search_web
 from ai import generate_response, analyse_image, is_ollama_healthy
 from image_handler import (
     validate_image, extract_metadata, build_fallback_description,
@@ -92,22 +92,30 @@ app.add_middleware(
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def _build_chat_prompt(user_message: str, search_context: str) -> str:
+def _build_chat_prompt(user_message: str, sources: list) -> str:
     """
     Assembles the prompt sent to Ollama.
-    If live search results exist, injects them into the prompt.
-    Otherwise passes the user question directly to Ollama.
+    Injects numbered web-search results as context when available.
     Built fresh in memory for every request — never logged or saved.
     """
-    if search_context and search_context.strip():
-        return (
-            f"{search_context.strip()}\n\n"
-            f"[User Question]\n{user_message}\n\n"
-            "[Instructions]\n"
-            "Using the web search results above, answer the user's question accurately "
-            "and concisely. Cite sources where relevant."
-        )
-    return user_message
+    if sources:
+        context = ""
+        for i, source in enumerate(sources, start=1):
+            context += f"Source {i}:\nTitle: {source.title}\nContent: {source.snippet}\n\n"
+    else:
+        context = "No relevant information found from the internet."
+
+    return f"""You are SilentGPT, a helpful and private AI assistant.
+Use the following information collected from the internet to answer the user's question.
+If the information is insufficient, politely say that you couldn't find enough information.
+Do NOT mention that you are using search results — just answer naturally.
+Never store, repeat, or log the user's message.
+
+Internet Information:
+{context}
+User Question: {user_message}
+
+Answer clearly and concisely:"""
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -167,15 +175,14 @@ async def chat(
     response_text: str = ""
 
     try:
-        # Step 1 — Web search
+        # Step 1 — Search the internet
         # ZDR: query is a local variable; not logged or stored.
         sources = await search_web(request.message)
-        search_context = format_sources_for_prompt(sources)
 
-        # Step 2 — Build prompt (in-memory only)
-        prompt = _build_chat_prompt(request.message, search_context)
+        # Step 2 — Build prompt from numbered search results (in-memory only)
+        prompt = _build_chat_prompt(request.message, sources)
 
-        # Step 3 — Generate response via Ollama
+        # Step 3 — Send to Ollama
         response_text = await generate_response(prompt, model=cfg.OLLAMA_MODEL)
 
         if not response_text:
@@ -197,9 +204,8 @@ async def chat(
 
     finally:
         # ── ZDR Cleanup ──────────────────────────────────────────
-        # Explicitly delete large in-memory objects.
-        # Python's GC would collect these anyway, but we do it
-        # explicitly to make the ZDR guarantee crystal-clear.
+        # Explicitly delete the prompt from RAM.
+        # Step 5 — Zero Data Retention: we do not store anything.
         del prompt
         gc.collect()
 

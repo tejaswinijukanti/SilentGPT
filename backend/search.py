@@ -12,6 +12,7 @@ as soon as the calling endpoint sends its response.
 """
 
 import httpx
+from tavily import AsyncTavilyClient
 from models import SearchSource
 from config import get_settings
 
@@ -22,29 +23,25 @@ settings = get_settings()
 
 async def _search_tavily(query: str) -> list[SearchSource]:
     """
-    Calls the Tavily Search API and returns a list of SearchSource objects.
+    Calls the Tavily Search API using the official Tavily SDK
+    and returns a list of SearchSource objects.
     Tavily is AI-optimised: it returns clean snippets ideal for LLM prompts.
     """
-    payload = {
-        "api_key": settings.TAVILY_API_KEY,
-        "query": query,
-        "search_depth": "basic",
-        "max_results": settings.SEARCH_MAX_RESULTS,
-        "include_answer": False,
-    }
-
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post("https://api.tavily.com/search", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    client = AsyncTavilyClient(api_key=settings.TAVILY_API_KEY)
+    response = await client.search(
+        query=query,
+        search_depth="basic",
+        max_results=settings.SEARCH_MAX_RESULTS,
+        include_answer=False,
+    )
 
     sources: list[SearchSource] = []
-    for r in data.get("results", []):
+    for r in response.get("results", []):
         sources.append(
             SearchSource(
-                title=r.get("title", ""),
-                url=r.get("url", ""),
-                snippet=r.get("content", "")[:500],   # cap snippet length
+                title=r.get("title") or "",
+                url=r.get("url") or "",
+                snippet=(r.get("content") or "")[:500],   # cap snippet length
             )
         )
     return sources
@@ -89,7 +86,7 @@ async def _search_serper(query: str) -> list[SearchSource]:
 async def search_web(query: str) -> list[SearchSource]:
     """
     Dispatches to the configured search provider.
-    Returns an empty list if no API key is set (graceful degradation).
+    Returns an empty list if no API key is set or on error (graceful degradation).
 
     ZDR NOTE: The query string is used only within this function call.
               It is never written to disk, a database, or a log file.
@@ -97,18 +94,30 @@ async def search_web(query: str) -> list[SearchSource]:
     provider = settings.SEARCH_PROVIDER.lower()
 
     if provider == "tavily" and settings.TAVILY_API_KEY:
-        return await _search_tavily(query)
+        try:
+            return await _search_tavily(query)
+        except Exception:
+            pass
 
     if provider == "serper" and settings.SERPER_API_KEY:
-        return await _search_serper(query)
+        try:
+            return await _search_serper(query)
+        except Exception:
+            pass
 
     # Fallback: try the other provider automatically
     if settings.TAVILY_API_KEY:
-        return await _search_tavily(query)
+        try:
+            return await _search_tavily(query)
+        except Exception:
+            pass
     if settings.SERPER_API_KEY:
-        return await _search_serper(query)
+        try:
+            return await _search_serper(query)
+        except Exception:
+            pass
 
-    # No key configured — return empty list
+    # No key configured or error occurred — return empty list
     return []
 
 

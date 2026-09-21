@@ -6,8 +6,9 @@
 fastapi>=0.115.5
 uvicorn[standard]>=0.32.1           # ASGI server
 
-# ── HTTP Client (async) ────────────────────────────────────────
-httpx>=0.28.0                       # Ollama, Tavily, Serper API calls
+# ── HTTP Client / Search SDK ──────────────────────────────────
+httpx>=0.28.0                       # Ollama, Serper API calls
+tavily-python>=0.8.0                 # Official Tavily search SDK
 
 # ── Settings / Environment ─────────────────────────────────────
 # pydantic >=2.11 ships pydantic-core >=2.27 which uses PyO3 0.23+
