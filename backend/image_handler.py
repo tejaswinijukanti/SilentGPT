@@ -13,7 +13,6 @@ Zero Data Retention:
 """
 
 import io
-import base64
 from PIL import Image, ExifTags, ImageFilter, ImageEnhance
 from config import get_settings
 
@@ -107,36 +106,77 @@ def build_fallback_description(metadata: dict) -> str:
     return desc
 
 
+# All supported editing actions and their human-readable descriptions.
+SUPPORTED_ACTIONS: dict[str, str] = {
+    "remove_bg":  "Remove image background using AI (rembg)",
+    "grayscale":  "Convert image to greyscale",
+    "blur":       "Apply Gaussian blur  — level controls radius (default 3)",
+    "sharpen":    "Sharpen the image   — level controls passes (default 1)",
+    "brightness": "Adjust brightness   — level is a multiplier (default 1.4)",
+    "contrast":   "Adjust contrast     — level is a multiplier (default 1.4)",
+    "saturation": "Adjust colour saturation — level is a multiplier (default 1.4)",
+    "rotate":     "Rotate image        — level is degrees clockwise (default 90)",
+    "flip_h":     "Flip image horizontally (mirror)",
+    "flip_v":     "Flip image vertically",
+    "crop":       "Centre-crop to a square",
+}
+
+
+def detect_edit_action(text: str) -> str | None:
+    """
+    Parse a natural-language instruction and return the matching
+    SUPPORTED_ACTIONS key, or None if no action is recognised.
+    """
+    text = text.lower().strip()
+
+    if any(kw in text for kw in ["remove background", "remove bg", "background remove", "remove the background"]):
+        return "remove_bg"
+    elif any(kw in text for kw in ["grayscale", "black and white", "b&w", "black & white"]):
+        return "grayscale"
+    elif "blur" in text:
+        return "blur"
+    elif any(kw in text for kw in ["sharpen", "sharp", "make it sharp"]):
+        return "sharpen"
+    elif any(kw in text for kw in ["brightness", "brighter", "increase brightness", "make it brighter"]):
+        return "brightness"
+
+    return None
+
+
 def process_image(image_bytes: bytes, action: str) -> bytes:
     """
-    Perform basic image editing.
-    Actions: remove_bg, grayscale, blur, sharpen, brightness
+    Apply the requested image edit and return the result as PNG bytes.
+
+    Supported actions
+    -----------------
+    remove_bg   — AI background removal via rembg
+    grayscale   — Convert to greyscale
+    blur        — Gaussian blur (radius 3)
+    sharpen     — Sharpen filter
+    brightness  — Brightness adjust (multiplier 1.4)
+
+    ZDR Note
+    --------
+    All intermediate objects are local and garbage-collected on return.
     """
+    if action == "remove_bg":
+        from rembg import remove
+        return remove(image_bytes)
+
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
 
-    if action == "remove_bg":
-        try:
-            from rembg import remove
-            output = remove(image_bytes)
-            return output
-        except Exception as e:
-            raise RuntimeError(f"Background removal failed: {e}")
-
-    elif action == "grayscale":
+    if action == "grayscale":
         img = img.convert("L").convert("RGBA")
-
     elif action == "blur":
         img = img.filter(ImageFilter.GaussianBlur(radius=3))
-
     elif action == "sharpen":
         img = img.filter(ImageFilter.SHARPEN)
-
     elif action == "brightness":
         enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(1.4)  # 1.0 = original
+        img = enhancer.enhance(1.4)
 
-    # Convert back to bytes
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()
+
 

@@ -1499,3 +1499,51 @@ body.chat-lock {
   .br-desktop { display: none; }
 }
 
+/* ==========================================
+   IMAGE PREVIEW + EDIT OPTIONS
+   ========================================== */
+#image-preview-container {
+  margin-top: 14px;
+  padding: 12px;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 16px;
+  backdrop-filter: blur(10px);
+}
+
+#image-preview {
+  max-width: 220px;
+  width: 100%;
+  border-radius: 12px;
+  margin-bottom: 12px;
+  display: block;
+}
+
+.image-edit-options {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.edit-btn {
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.4);
+  color: #e9d5ff;
+  padding: 8px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  backdrop-filter: blur(8px);
+}
+
+.edit-btn:hover {
+  background: rgba(139, 92, 246, 0.35);
+  border-color: rgba(196, 181, 253, 0.7);
+  transform: translateY(-1px);
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.3);
+}
+
+.edit-btn:active {
+  transform: scale(0.97);
+}

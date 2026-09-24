@@ -401,6 +401,56 @@ async function sendMessage() {
         throw new Error(errData.detail || `Server error (${res.status})`);
       }
       const data = await res.json();
+
+      // Backend ran detect_edit_action — render the edited image inline
+      const action = detect_edit_action(text);
+
+      if (action && data.image) {
+        let edited_bytes = data.image;
+        let b64_image = data.image;
+
+        // Update state so follow-up edits use the new image
+        state.pendingImage = data.image;
+        const resBlob = await fetch(data.image);
+        const blob = await resBlob.blob();
+        state.pendingImageFile = new File([blob], `edited_${data.action}.png`, { type: "image/png" });
+
+        // Render edited image bubble in chat
+        removeTyping(typingId);
+        if (sendBtn) sendBtn.disabled = false;
+
+        const container = document.getElementById("chat-messages");
+        const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const avatarUid = `av-${Date.now()}`;
+        const el = document.createElement("div");
+        el.className = "message ai";
+        el.innerHTML = `
+          <div class="message-row">
+            ${makeAvatarHTML("done", avatarUid)}
+            <div class="message-bubble" style="padding:10px;">
+              <img src="${escAttr(data.image)}" alt="Edited image"
+                   style="max-width:280px;border-radius:12px;display:block;margin-bottom:8px;"/>
+              <a href="${escAttr(data.image)}" download="silentgpt-edited-${escAttr(data.action)}.png"
+                 style="display:inline-block;padding:6px 12px;border-radius:8px;
+                        background:rgba(139,92,246,0.25);color:#e9d5ff;font-size:13px;
+                        text-decoration:none;border:1px solid rgba(167,139,250,0.4);">
+                ⬇ Download Image
+              </a>
+            </div>
+          </div>
+          <span class="message-time">${time}</span>
+        `;
+        container.appendChild(el);
+        scrollToBottom();
+        showImagePreview(data.image);
+
+        const aiEditMsg = { role: "ai", text: `✅ Applied: ${data.action}`, isHTML: false };
+        state.messages.push(aiEditMsg);
+        saveCurrentToHistory();
+        state.isResponding = false;
+        return;
+      }
+
       aiResponse = data.analysis || "No analysis returned.";
 
     } else {
@@ -483,8 +533,13 @@ function appendMessage(msg, animate) {
     scrollToBottom();
     const bubble = el.querySelector(".message-bubble");
     if (bubble) {
-      if (animate) typewriterEffect(bubble, msg.text);
-      else bubble.innerHTML = escHtml(msg.text);
+      if (msg.isHTML) {
+        bubble.innerHTML = msg.text;
+      } else if (animate) {
+        typewriterEffect(bubble, msg.text);
+      } else {
+        bubble.innerHTML = escHtml(msg.text);
+      }
     }
     // Transition: done smile → default logo after 1.7s
     if (animate) {
@@ -590,6 +645,35 @@ function generateAIResponse(text, image) {
 }
 
 /* ==========================================
+   DETECT EDIT ACTION (mirrors backend logic)
+   ========================================== */
+/**
+ * Parse a natural-language instruction and return the matching
+ * SUPPORTED_ACTIONS key, or null if no action is recognised.
+ * Mirrors image_handler.detect_edit_action() in the Python backend.
+ *
+ * @param {string} text
+ * @returns {string|null}
+ */
+function detect_edit_action(text) {
+  if (!text) return null;
+  const t = text.toLowerCase().trim();
+
+  if (t.includes("remove background") || t.includes("remove bg") || t.includes("background remove"))
+    return "remove_bg";
+  if (t.includes("grayscale") || t.includes("black and white") || t.includes("b&w"))
+    return "grayscale";
+  if (t.includes("blur"))
+    return "blur";
+  if (t.includes("sharpen") || t.includes("sharp"))
+    return "sharpen";
+  if (t.includes("brightness") || t.includes("brighter") || t.includes("increase brightness"))
+    return "brightness";
+
+  return null;
+}
+
+/* ==========================================
    IMAGE UPLOAD
    ========================================== */
 (function initImageUpload() {
@@ -615,12 +699,12 @@ function showImagePreview(src) {
         <img src="${escAttr(src)}" alt="Preview"/>
         <button class="image-preview-remove" onclick="removeImagePreview()" aria-label="Remove image">&times;</button>
       </div>
-      <div class="image-edit-options" style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
-        <button type="button" onclick="editImage('remove_bg')">Remove Background</button>
-        <button type="button" onclick="editImage('grayscale')">Grayscale</button>
-        <button type="button" onclick="editImage('blur')">Blur</button>
-        <button type="button" onclick="editImage('sharpen')">Sharpen</button>
-        <button type="button" onclick="editImage('brightness')">Brightness</button>
+      <div class="image-edit-options">
+        <button class="edit-btn" type="button" onclick="editImage('remove_bg')">Remove BG</button>
+        <button class="edit-btn" type="button" onclick="editImage('grayscale')">Grayscale</button>
+        <button class="edit-btn" type="button" onclick="editImage('blur')">Blur</button>
+        <button class="edit-btn" type="button" onclick="editImage('sharpen')">Sharpen</button>
+        <button class="edit-btn" type="button" onclick="editImage('brightness')">Brightness</button>
       </div>
     </div>
   `;
@@ -643,9 +727,11 @@ async function editImage(action) {
   formData.append("file", state.pendingImageFile);
   formData.append("action", action);
 
+  let typingId = null;
+
   try {
-    // Show loading
-    const typingId = showTyping();
+    // Show typing animation
+    typingId = showTyping();
 
     const response = await fetch(`${API_BASE}/edit-image`, {
       method: "POST",
@@ -653,7 +739,7 @@ async function editImage(action) {
     });
 
     const data = await response.json();
-    removeTyping(typingId);
+    if (typingId) removeTyping(typingId);
 
     if (data.success) {
       // Update in-memory state so subsequent edits / sends use the edited image
@@ -662,26 +748,56 @@ async function editImage(action) {
       const blob = await resBlob.blob();
       state.pendingImageFile = new File([blob], `edited_${action}.png`, { type: "image/png" });
 
-      // Show the edited image in chat
-      const labelMsg = { role: "ai", text: `Here's the edited image (${action}):` };
-      state.messages.push(labelMsg);
-      appendMessage(labelMsg, true);
+      // Create image + download button and insert into chat
+      const chatBox = document.getElementById("chat-messages");
 
-      // Display the image in a separate bubble
-      const imgMsg = {
-        role: "ai",
-        text: `<img src="${escAttr(data.image)}" style="max-width:100%;border-radius:12px;margin-top:8px;" alt="Edited image"/>`
-      };
-      state.messages.push(imgMsg);
-      appendMessage(imgMsg, false);
+      const wrapper = document.createElement("div");
+      wrapper.className = "message ai-message";
+      wrapper.style.marginTop = "10px";
+
+      const bubble = document.createElement("div");
+      bubble.className = "message-bubble";
+      bubble.style.padding = "10px";
+
+      // Edited Image
+      const img = document.createElement("img");
+      img.src = data.image;
+      img.style.maxWidth = "280px";
+      img.style.borderRadius = "12px";
+      img.style.display = "block";
+      img.style.marginBottom = "8px";
+
+      // Download Button
+      const downloadBtn = document.createElement("a");
+      downloadBtn.href = data.image;
+      downloadBtn.download = `silentgpt-edited-${action}.png`;
+      downloadBtn.textContent = "Download Image";
+      downloadBtn.style.display = "inline-block";
+      downloadBtn.style.marginTop = "6px";
+      downloadBtn.style.padding = "6px 12px";
+      downloadBtn.style.borderRadius = "8px";
+      downloadBtn.style.background = "rgba(139, 92, 246, 0.25)";
+      downloadBtn.style.color = "#e9d5ff";
+      downloadBtn.style.fontSize = "13px";
+      downloadBtn.style.textDecoration = "none";
+      downloadBtn.style.border = "1px solid rgba(167, 139, 250, 0.4)";
+
+      bubble.appendChild(img);
+      bubble.appendChild(downloadBtn);
+      wrapper.appendChild(bubble);
+      chatBox.appendChild(wrapper);
+
+      // Scroll to bottom
+      chatBox.scrollTop = chatBox.scrollHeight;
 
       // Refresh the preview thumbnail with the new image
       showImagePreview(data.image);
     } else {
-      appendMessage({ role: "ai", text: "Sorry, failed to edit the image." }, true);
+      appendMessage({ role: "ai", text: "Failed to edit the image." }, true);
     }
 
   } catch (error) {
+    if (typingId) removeTyping(typingId);
     console.error(error);
     appendMessage({ role: "ai", text: "Error while editing the image." }, true);
   }
@@ -756,10 +872,161 @@ async function checkBackendHealth() {
 }
 
 /* ==========================================
+   HANDLE SEND (natural-language unified handler)
+   ========================================== */
+/**
+ * Unified send handler used as an alternative entry point to sendMessage().
+ * Routes image + text to /edit-image-natural, plain text to /chat,
+ * and branches the rendered response on data.type ("image" vs "text").
+ */
+async function handleSend() {
+  const userInput = document.getElementById("userInput")
+    ? document.getElementById("userInput").value.trim()
+    : (document.getElementById("chat-input") ? document.getElementById("chat-input").value.trim() : "");
+
+  if (!userInput && !state.pendingImageFile) return;
+
+  // Show user message bubble
+  if (userInput) {
+    appendMessage({ role: "user", text: userInput }, true);
+  }
+
+  // Clear input
+  const inputEl = document.getElementById("userInput") || document.getElementById("chat-input");
+  if (inputEl) { inputEl.value = ""; autoResize && autoResize(inputEl); }
+
+  // Dismiss welcome screen
+  const welcome = document.getElementById("chat-welcome");
+  if (welcome) {
+    welcome.style.opacity = "0";
+    welcome.style.transform = "scale(0.95)";
+    welcome.style.transition = "all 0.2s";
+    setTimeout(() => welcome.remove(), 200);
+  }
+
+  let typingId = showTyping();
+  state.isResponding = true;
+  const sendBtn = document.getElementById("send-btn");
+  if (sendBtn) sendBtn.disabled = true;
+
+  try {
+    let response, data;
+
+    if (state.pendingImageFile) {
+      // Image + natural-language instruction → /edit-image-natural
+      const formData = new FormData();
+      formData.append("file", state.pendingImageFile);
+      formData.append("message", userInput);
+
+      response = await fetch(`${API_BASE}/edit-image-natural`, {
+        method: "POST",
+        body: formData,
+      });
+    } else {
+      // Plain text → /chat
+      response = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userInput }),
+      });
+    }
+
+    data = await response.json();
+    removeTyping(typingId);
+
+    if (data.type === "image") {
+      // Backend detected and applied an edit action
+      showEditedImage(data.image, data.action);
+
+      // Keep state in sync so follow-up edits chain
+      state.pendingImage = data.image;
+      const resBlob = await fetch(data.image);
+      const blob = await resBlob.blob();
+      state.pendingImageFile = new File([blob], `edited_${data.action}.png`, { type: "image/png" });
+      showImagePreview(data.image);
+
+      const aiMsg = { role: "ai", text: `✅ Applied: ${data.action}`, isHTML: false };
+      state.messages.push(aiMsg);
+      saveCurrentToHistory();
+    } else {
+      // Normal text reply (or fallback hint from /edit-image-natural)
+      const replyText = data.response || data.analysis || "No response returned.";
+      const aiMsg = { role: "ai", text: replyText };
+      state.messages.push(aiMsg);
+      appendMessage(aiMsg, true);
+      saveCurrentToHistory();
+    }
+
+  } catch (error) {
+    removeTyping(typingId);
+    console.error("handleSend error:", error);
+    appendMessage({ role: "ai", text: "Something went wrong. Please try again." }, true);
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+    state.isResponding = false;
+    scrollToBottom();
+  }
+}
+
+/* ==========================================
+   SHOW EDITED IMAGE (inline chat bubble)
+   ========================================== */
+/**
+ * Render an edited image inside the chat as an AI message bubble,
+ * complete with a styled download link.
+ *
+ * @param {string} base64Image - data:image/png;base64,… URL
+ * @param {string} action      - SUPPORTED_ACTIONS key, e.g. "grayscale"
+ */
+function showEditedImage(base64Image, action) {
+  const chatBox = document.getElementById("chat-messages");
+  if (!chatBox) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "message ai-message";
+  wrapper.style.marginTop = "10px";
+
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  bubble.style.padding = "10px";
+
+  const img = document.createElement("img");
+  img.src = base64Image;
+  img.style.maxWidth = "300px";
+  img.style.borderRadius = "12px";
+  img.style.display = "block";
+  img.style.marginBottom = "8px";
+
+  const downloadBtn = document.createElement("a");
+  downloadBtn.href = base64Image;
+  downloadBtn.download = `silentgpt-${action}.png`;
+  downloadBtn.textContent = "Download";
+  downloadBtn.style.cssText = `
+    display: inline-block;
+    margin-top: 6px;
+    padding: 6px 14px;
+    border-radius: 8px;
+    background: rgba(139, 92, 246, 0.25);
+    color: #e9d5ff;
+    font-size: 13px;
+    text-decoration: none;
+    border: 1px solid rgba(167, 139, 250, 0.4);
+  `;
+
+  bubble.appendChild(img);
+  bubble.appendChild(downloadBtn);
+  wrapper.appendChild(bubble);
+  chatBox.appendChild(wrapper);
+
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+/* ==========================================
    INIT
    ========================================== */
 renderSidebarHistory();
 checkBackendHealth();
+
 
 
 

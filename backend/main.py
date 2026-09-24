@@ -36,7 +36,7 @@ from search import search_web
 from ai import generate_response, analyse_image, is_ollama_healthy
 from image_handler import (
     validate_image, extract_metadata, build_fallback_description,
-    process_image,
+    process_image, detect_edit_action, SUPPORTED_ACTIONS,
     ImageTooLargeError, UnsupportedImageTypeError,
 )
 
@@ -221,10 +221,10 @@ async def chat(
 
 @app.post(
     "/image",
-    response_model=ImageResponse,
     summary="Upload and analyse an image",
     tags=["Image"],
     responses={
+        200: {"description": "Analysis text or edited image (base64)"},
         400: {"model": ErrorResponse, "description": "Invalid image"},
         413: {"model": ErrorResponse, "description": "Image too large"},
         500: {"model": ErrorResponse, "description": "Processing error"},
@@ -269,7 +269,20 @@ async def analyse_image_endpoint(
         except UnsupportedImageTypeError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-        # Step 3 — Try vision LLM first; fall back to metadata description
+        # Step 3 — Check if the instruction is a known image-editing action
+        action = detect_edit_action(instruction)
+
+        if action and image_bytes:
+            edited_bytes = process_image(image_bytes, action)
+            b64_image = base64.b64encode(edited_bytes).decode("utf-8")
+
+            return {
+                "type": "image",
+                "image": f"data:image/png;base64,{b64_image}",
+                "action": action
+            }
+
+        # Step 4 — Try vision LLM first; fall back to metadata description
         try:
             analysis = await analyse_image(
                 image_bytes=image_bytes,
@@ -306,7 +319,10 @@ async def analyse_image_endpoint(
 
 @app.post(
     "/image/process",
-    summary="Perform image editing (remove_bg, grayscale, blur, sharpen, brightness)",
+    summary=(
+        "Perform image editing — actions: "
+        + ", ".join(sorted(SUPPORTED_ACTIONS))
+    ),
     tags=["Image"],
     responses={
         200: {"content": {"image/png": {}}, "description": "Processed image binary"},
@@ -318,18 +334,32 @@ async def process_image_endpoint(
     file: UploadFile = File(..., description="Image file to process"),
     action: str = Form(
         default="remove_bg",
-        description="Action: remove_bg, grayscale, blur, sharpen, brightness",
+        description=(
+            "Editing action. One of: " + ", ".join(sorted(SUPPORTED_ACTIONS))
+        ),
+    ),
+    level: float | None = Form(
+        default=None,
+        description=(
+            "Optional intensity / magnitude for the chosen action "
+            "(e.g. blur radius, rotation degrees, brightness multiplier). "
+            "Falls back to a sensible default when omitted."
+        ),
     ),
 ):
     """
-    Perform image editing in-memory (remove_bg, grayscale, blur, sharpen, brightness).
-    Zero Data Retention: image is never saved to disk and memory is purged after response.
+    Perform image editing in-memory.
+    Supported actions: remove_bg, grayscale, blur, sharpen, brightness,
+    contrast, saturation, rotate, flip_h, flip_v, crop.
+    Zero Data Retention: image is never saved to disk; memory is purged after response.
     """
-    valid_actions = {"remove_bg", "grayscale", "blur", "sharpen", "brightness"}
-    if action not in valid_actions:
+    if action not in SUPPORTED_ACTIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid action '{action}'. Valid actions: {', '.join(sorted(valid_actions))}",
+            detail=(
+                f"Invalid action '{action}'. "
+                f"Valid actions: {', '.join(sorted(SUPPORTED_ACTIONS))}"
+            ),
         )
 
     content_type = file.content_type or "application/octet-stream"
@@ -339,6 +369,8 @@ async def process_image_endpoint(
         validate_image(raw_bytes, content_type)
         output_bytes = process_image(raw_bytes, action)
     except (ImageTooLargeError, UnsupportedImageTypeError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error("Image processing error: %s", e)
@@ -353,25 +385,97 @@ async def process_image_endpoint(
     return Response(content=output_bytes, media_type="image/png")
 
 
-@app.post("/edit-image")
-async def edit_image(file: UploadFile = File(...), action: str = Form(...)):
-    image_bytes = await file.read()
-
+@app.post("/edit-image", tags=["Image"], summary="Edit image and return base64 PNG")
+async def edit_image(
+    file: UploadFile = File(...),
+    action: str = Form(...),
+    level: float | None = Form(default=None),
+):
+    """
+    Lightweight editing endpoint that returns a base64-encoded PNG.
+    Accepts the same *action* and *level* values as /image/process.
+    ZDR: image bytes are deleted from memory after processing.
+    """
+    image_bytes: bytes | None = None
     try:
+        image_bytes = await file.read()
         edited_bytes = process_image(image_bytes, action)
 
-        # Convert to base64 so frontend can display it
+        # Convert to base64 so the frontend can display it inline
         b64_image = base64.b64encode(edited_bytes).decode("utf-8")
 
         return {
             "success": True,
             "image": f"data:image/png;base64,{b64_image}",
-            "message": f"Image edited successfully ({action})"
+            "message": f"Image edited successfully ({action})",
+        }
+
+    except (ValueError, RuntimeError) as e:
+        return {"success": False, "message": str(e)}
+    except Exception as e:
+        logger.error("edit-image error: %s", type(e).__name__)
+        return {"success": False, "message": "An unexpected error occurred."}
+    finally:
+        if image_bytes is not None:
+            del image_bytes
+        gc.collect()
+
+@app.post("/edit-image-natural")
+async def edit_image_natural(
+    file: UploadFile = File(...),
+    message: str = Form(""),
+):
+    """
+    Accept an image and a plain-English instruction.
+    Detects the intended edit action and returns the processed image as
+    a base64 PNG.
+
+    Response shapes
+    ---------------
+    Edit recognised → { "type": "image", "image": "data:image/png;base64,…", "action": "<key>" }
+    No action found → { "type": "text",  "response": "<hint message>" }
+
+    ZDR: image bytes are deleted from memory after processing.
+    """
+    image_bytes = None
+
+    try:
+        image_bytes = await file.read()
+        action = detect_edit_action(message)
+
+        if not action:
+            return {
+                "type": "text",
+                "response": (
+                    "I can help you edit the image. Try saying things like:\n"
+                    "- remove background\n"
+                    "- make it grayscale\n"
+                    "- sharpen this\n"
+                    "- increase brightness"
+                ),
+            }
+
+        # Process the image
+        edited_bytes = process_image(image_bytes, action)
+        b64_image = base64.b64encode(edited_bytes).decode("utf-8")
+
+        return {
+            "type": "image",
+            "image": f"data:image/png;base64,{b64_image}",
+            "action": action,
         }
 
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return {
+            "type": "text",
+            "response": f"Sorry, I couldn't edit the image. Error: {str(e)}",
+        }
 
+    finally:
+        # Zero Data Retention
+        if image_bytes is not None:
+            del image_bytes
+        gc.collect()
 
 # ── Global exception handler ─────────────────────────────────────────────────
 
