@@ -12,6 +12,8 @@ Zero Data Retention:
   - The prompt string is garbage-collected as soon as the function returns.
 """
 
+import json
+import re
 import httpx
 import base64
 from config import get_settings
@@ -144,3 +146,120 @@ async def is_ollama_healthy() -> bool:
             return resp.status_code == 200
     except Exception:
         return False
+
+
+# ── Document & Presentation Content Generation ───────────────────────────────
+
+async def generate_document_content(topic: str) -> dict:
+    """
+    Ask Ollama to create structured content for a Word document.
+    Returns: { "title": "...", "sections": [{"heading": "...", "content": "..."}] }
+    """
+    prompt = f"""
+Create a well-structured educational document on the topic: "{topic}".
+
+Return ONLY valid JSON in this exact format (no extra text):
+
+{{
+  "title": "Document Title",
+  "sections": [
+    {{
+      "heading": "Introduction",
+      "content": "Write 2-3 paragraphs here..."
+    }},
+    {{
+      "heading": "Main Point 1",
+      "content": "Write detailed content here..."
+    }},
+    {{
+      "heading": "Main Point 2",
+      "content": "Write detailed content here..."
+    }},
+    {{
+      "heading": "Conclusion",
+      "content": "Write conclusion here..."
+    }}
+  ]
+}}
+
+Rules:
+- Make 4 to 6 sections
+- Content should be informative and clear
+- Do not add any text outside the JSON
+"""
+
+    raw = await generate_response(prompt)
+    return _extract_json(raw)
+
+
+async def generate_presentation_content(topic: str) -> dict:
+    """
+    Ask Ollama to create structured content for a PowerPoint.
+    Returns: { "title": "...", "slides": [{"title": "...", "points": ["...", "..."]}] }
+    """
+    prompt = f"""
+Create a professional presentation on the topic: "{topic}".
+
+Return ONLY valid JSON in this exact format (no extra text):
+
+{{
+  "title": "Presentation Title",
+  "slides": [
+    {{
+      "title": "Introduction",
+      "points": [
+        "Point 1",
+        "Point 2",
+        "Point 3"
+      ]
+    }},
+    {{
+      "title": "Key Concept 1",
+      "points": [
+        "Point 1",
+        "Point 2",
+        "Point 3"
+      ]
+    }},
+    {{
+      "title": "Key Concept 2",
+      "points": [
+        "Point 1",
+        "Point 2"
+      ]
+    }},
+    {{
+      "title": "Conclusion",
+      "points": [
+        "Summary point 1",
+        "Summary point 2"
+      ]
+    }}
+  ]
+}}
+
+Rules:
+- Make 5 to 8 slides
+- Each slide should have 3 to 5 short bullet points
+- Do not add any text outside the JSON
+"""
+
+    raw = await generate_response(prompt)
+    return _extract_json(raw)
+
+
+def _extract_json(text: str) -> dict:
+    """Safely extract JSON from the model response."""
+    try:
+        # Try direct parse first
+        return json.loads(text)
+    except:
+        # Fallback: find JSON block inside the text
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except:
+                pass
+    return {"title": "Generated Content", "sections": [], "slides": []}
+

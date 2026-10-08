@@ -25,3 +25,6 @@ python-multipart>=0.0.12            # Required for FastAPI UploadFile / Form
 Pillow>=11.1.0
 rembg>=2.0.85
 onnxruntime>=1.20.0
+# ── Document & Presentation Generation ─────────────────────────
+python-docx>=1.1.2
+python-pptx>=1.0.2

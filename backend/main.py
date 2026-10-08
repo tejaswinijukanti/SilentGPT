@@ -39,6 +39,9 @@ from image_handler import (
     process_image, detect_edit_action, SUPPORTED_ACTIONS,
     ImageTooLargeError, UnsupportedImageTypeError,
 )
+from document_generator import create_document, create_presentation
+from content_generator import generate_document_content, generate_presentation_content
+
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -476,6 +479,71 @@ async def edit_image_natural(
         if image_bytes is not None:
             del image_bytes
         gc.collect()
+
+
+# ── Document & Presentation Generation (AI-powered) ────────────────────────
+
+@app.post("/generate-document")
+async def generate_document_endpoint(request: dict):
+    """
+    Generate a Word document from a plain topic.
+    Body: { "topic": "Climate Change" }
+    """
+    topic = request.get("topic", "").strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic is required")
+
+    try:
+        # 1. AI generates structured content
+        content = await generate_document_content(topic)
+
+        # 2. Create the actual Word file in memory
+        doc_bytes = create_document(
+            title=content.get("title", topic),
+            sections=content.get("sections", [])
+        )
+
+        filename = content.get("title", topic).replace(" ", "_") + ".docx"
+
+        return Response(
+            content=doc_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+    finally:
+        gc.collect()
+
+
+@app.post("/generate-presentation")
+async def generate_presentation_endpoint(request: dict):
+    """
+    Generate a PowerPoint presentation from a plain topic.
+    Body: { "topic": "Artificial Intelligence" }
+    """
+    topic = request.get("topic", "").strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic is required")
+
+    try:
+        # 1. AI generates structured slides
+        content = await generate_presentation_content(topic)
+
+        # 2. Create the actual PowerPoint in memory
+        ppt_bytes = create_presentation(
+            title=content.get("title", topic),
+            slides_data=content.get("slides", [])
+        )
+
+        filename = content.get("title", topic).replace(" ", "_") + ".pptx"
+
+        return Response(
+            content=ppt_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+    finally:
+        gc.collect()
+
 
 # ── Global exception handler ─────────────────────────────────────────────────
 
