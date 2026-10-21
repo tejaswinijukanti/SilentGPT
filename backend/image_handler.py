@@ -98,10 +98,8 @@ def build_fallback_description(metadata: dict) -> str:
     desc = (
         f"Image received and processed successfully.\n"
         f"Format: {fmt} | Dimensions: {w}×{h}px | "
-        f"Colour mode: {mode} | File size: {size} KB\n"
         f"Note: A vision-capable model (e.g. llava, phi3:vision) is required "
-        f"for detailed AI analysis. Configure OLLAMA_VISION_MODEL in your .env file.\n"
-        f"🔒 Image has been permanently deleted from our systems."
+        f"for detailed AI analysis. Configure OLLAMA_VISION_MODEL in your .env file."
     )
     return desc
 

@@ -22,6 +22,107 @@ const state = {
 };
 
 /* ==========================================
+   DOCUMENT & PRESENTATION DETECTION / GENERATION
+   ========================================== */
+function detectFileRequest(message) {
+  const text = (message || "").toLowerCase().trim();
+  console.log("[SilentGPT] detectFileRequest:", text);
+
+  const isPpt =
+    /\b(presentation|slides|powerpoint|\bppt\b)\b/.test(text) &&
+    /\b(make|create|generate|need|give|prepare|write)\b/.test(text);
+
+  const isDoc =
+    /\b(document|documentation|report|notes|\bdocx\b)\b/.test(text) &&
+    /\b(make|create|generate|need|give|prepare|write)\b/.test(text);
+
+  if (isPpt) {
+    const topic = extractTopicFromMessage(text);
+    console.log("[SilentGPT] PPT detected, topic:", topic);
+    return { type: "presentation", topic };
+  }
+  if (isDoc) {
+    const topic = extractTopicFromMessage(text);
+    console.log("[SilentGPT] DOC detected, topic:", topic);
+    return { type: "document", topic };
+  }
+  console.log("[SilentGPT] no file request");
+  return null;
+}
+
+function extractTopicFromMessage(text) {
+  return text
+    .replace(/\b(make|create|generate|need|give|prepare|write|me|a|an|the|on|about|for|regarding|of|in|even|used|to|u)\b/gi, " ")
+    .replace(/\b(presentation|slides|powerpoint|ppt|document|documentation|report|notes|docx)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim() || "General Topic";
+}
+
+async function handleFileGeneration(type, topic, instructions) {
+  const typingId = showTyping();
+  try {
+    const endpoint = type === "document"
+      ? `${API_BASE}/generate-document`
+      : `${API_BASE}/generate-presentation`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        topic: topic,
+        instructions: instructions || topic
+      })
+    });
+
+    removeTyping(typingId);
+
+    if (!response.ok) {
+      appendMessage({ role: "ai", text: "Could not generate the file. Try again." }, true);
+      return;
+    }
+
+    const blob = await response.blob();
+    let filename = type === "document" ? "SilentGPT_Document.docx" : "SilentGPT_Presentation.pptx";
+    const cd = response.headers.get("Content-Disposition") || "";
+    const match = cd.match(/filename="?([^"]+)"?/);
+    if (match) filename = match[1];
+
+    const url = URL.createObjectURL(blob);
+    showDownloadMessage(type, topic, url, filename);
+  } catch (e) {
+    removeTyping(typingId);
+    console.error(e);
+    appendMessage({ role: "ai", text: "Error generating file." }, true);
+  }
+}
+
+function showDownloadMessage(type, topic, downloadUrl, filename) {
+  const chatBox = document.getElementById("chat-messages");
+  if (!chatBox) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "message ai-message";
+
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  bubble.style.padding = "14px";
+
+  const label = type === "document" ? "Document" : "Presentation";
+  bubble.innerHTML = `<p style="margin:0 0 10px 0">Your ${label} on <strong>${topic}</strong> is ready.</p>`;
+
+  const a = document.createElement("a");
+  a.href = downloadUrl;
+  a.download = filename;
+  a.textContent = `Download ${label}`;
+  a.style.cssText = "display:inline-block;padding:8px 16px;border-radius:10px;background:rgba(139,92,246,0.35);color:#e9d5ff;text-decoration:none;border:1px solid rgba(167,139,250,0.5)";
+  bubble.appendChild(a);
+
+  wrapper.appendChild(bubble);
+  chatBox.appendChild(wrapper);
+  scrollToBottom();
+}
+
+/* ==========================================
    MATRIX RAIN CANVAS
    ========================================== */
 (function initMatrix() {
@@ -375,6 +476,13 @@ async function sendMessage() {
   appendMessage(userMsg, true);
   saveCurrentToHistory();
 
+  // NEW: file generation short-circuit
+  const fileRequest = detectFileRequest(text);
+  if (fileRequest) {
+    await handleFileGeneration(fileRequest.type, fileRequest.topic, text);
+    return;
+  }
+
   // Show thinking animation while waiting for backend
   const typingId = showTyping();
   state.isResponding = true;
@@ -488,6 +596,7 @@ async function sendMessage() {
   }
 
   // Append AI reply bubble
+  aiResponse = cleanAIReply(aiResponse);
   const aiMsg = { role: "ai", text: aiResponse };
   state.messages.push(aiMsg);
   appendMessage(aiMsg, true);
@@ -629,20 +738,33 @@ function removeTyping(id) { if (!id) return; const el = document.getElementById(
 function scrollToBottom() { const c = document.getElementById("chat-messages"); if (c) c.scrollTop = c.scrollHeight; }
 
 /* ==========================================
-   AI RESPONSES
+   CLEAN & AI RESPONSES
    ========================================== */
+function cleanAIReply(text) {
+  if (!text) return "";
+  return text
+    .replace(/\n*🔒\s*Your query has been permanently deleted from our systems\.\s*$/i, "")
+    .replace(/\n*🔒\s*Image has been permanently deleted from our systems\.\s*$/i, "")
+    .replace(/\n*🔒\s*Zero data retention active\..*$/i, "")
+    .replace(/\n*🔒\s*Private mode:.*$/i, "")
+    .replace(/\n*🔒\s*SilentGPT guarantee:.*$/i, "")
+    .trim();
+}
+
 function generateAIResponse(text, image) {
   if (image && !text) {
-    return "I can see the image you've uploaded! I've analyzed its contents. In a live deployment, I would provide comprehensive computer vision analysis — identifying objects, text, and context. Your image data has been processed and will be permanently deleted immediately. \uD83D\uDD12 Zero retention guaranteed.";
+    return "I can see the image you've uploaded! I've analyzed its contents.";
   }
   const responses = [
-    `Great question! I've searched across multiple live web sources to find the most current answer.\n\nBased on the latest information: "${text.slice(0,30)}..." has rich context. Real-time data suggests significant developments in the last 24\u201348 hours. I've cross-referenced multiple high-authority sources for this synthesized answer.\n\n\uD83D\uDD12 Your query is now permanently deleted from our systems.`,
-    `I found several relevant sources on this topic.\n\nIn short: the latest on "${text.slice(0,40)}..." points to fascinating insights. Multiple trusted sources confirm the core facts, with noteworthy recent updates.\n\nFor deeper exploration, just ask!\n\n\uD83D\uDD12 Zero data retention active. Not stored, not used for training.`,
-    `Searching the live web now... \u2713\n\nHere's what I found about "${text.slice(0,35)}":\n\nThe current consensus is clear and well-supported. There's been notable expert discussion, and the latest data points to important conclusions.\n\nWant me to dive deeper?\n\n\uD83D\uDD12 Private mode: All data deleted after delivery.`,
-    `Based on my real-time internet search:\n\nYour query touches on a timely subject. Here's the synthesized answer from the most authoritative sources:\n\nKey points are well-documented by multiple independent sources. Recent developments have added new dimensions that reshape expert understanding.\n\n\uD83D\uDD12 SilentGPT guarantee: Zero data retention. This conversation never existed on our servers.`,
+    `Great question! I've searched across multiple live web sources to find the most current answer.\n\nBased on the latest information: "${text.slice(0,30)}..." has rich context. Real-time data suggests significant developments in the last 24–48 hours. I've cross-referenced multiple high-authority sources for this synthesized answer.`,
+    `I found several relevant sources on this topic.\n\nIn short: the latest on "${text.slice(0,40)}..." points to fascinating insights. Multiple trusted sources confirm the core facts, with noteworthy recent updates.\n\nFor deeper exploration, just ask!`,
+    `Searching the live web now... ✓\n\nHere's what I found about "${text.slice(0,35)}":\n\nThe current consensus is clear and well-supported. There's been notable expert discussion, and the latest data points to important conclusions.\n\nWant me to dive deeper?`,
+    `Based on my real-time internet search:\n\nYour query touches on a timely subject. Here's the synthesized answer from the most authoritative sources:\n\nKey points are well-documented by multiple independent sources. Recent developments have added new dimensions that reshape expert understanding.`,
   ];
   return responses[Math.floor(Math.random() * responses.length)];
 }
+
+
 
 /* ==========================================
    DETECT EDIT ACTION (mirrors backend logic)
@@ -904,6 +1026,13 @@ async function handleSend() {
     setTimeout(() => welcome.remove(), 200);
   }
 
+  // Document / Presentation request
+  const fileRequest = detectFileRequest(userInput);
+  if (fileRequest) {
+    await handleFileGeneration(fileRequest.type, fileRequest.topic, userInput);
+    return; // do not fall through to /chat
+  }
+
   let typingId = showTyping();
   state.isResponding = true;
   const sendBtn = document.getElementById("send-btn");
@@ -950,7 +1079,7 @@ async function handleSend() {
       saveCurrentToHistory();
     } else {
       // Normal text reply (or fallback hint from /edit-image-natural)
-      const replyText = data.response || data.analysis || "No response returned.";
+      const replyText = cleanAIReply(data.response || data.analysis || "No response returned.");
       const aiMsg = { role: "ai", text: replyText };
       state.messages.push(aiMsg);
       appendMessage(aiMsg, true);
@@ -1026,6 +1155,54 @@ function showEditedImage(base64Image, action) {
    ========================================== */
 renderSidebarHistory();
 checkBackendHealth();
+
+/* ==========================================
+   CHATGPT-STYLE DRAG & DROP
+   ========================================== */
+(function initChatDrop() {
+  const panel = document.getElementById("chat-panel") ||
+                document.getElementById("chat-section") ||
+                document.getElementById("chat-messages")?.parentElement;
+  const overlay = document.getElementById("drop-overlay");
+  if (!panel || !overlay) return;
+
+  let dragDepth = 0;
+
+  panel.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragDepth++;
+    overlay.classList.add("active");
+  });
+
+  panel.addEventListener("dragover", (e) => {
+    e.preventDefault();
+  });
+
+  panel.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) overlay.classList.remove("active");
+  });
+
+  panel.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    overlay.classList.remove("active");
+
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !file.type.startsWith("image/")) return;
+
+    state.pendingImageFile = file;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      state.pendingImage = ev.target.result;
+      if (typeof showImagePreview === "function") {
+        showImagePreview(ev.target.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+})();
 
 
 

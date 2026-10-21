@@ -22,13 +22,13 @@ settings = get_settings()
 
 # System prompt that enforces SilentGPT's privacy persona.
 _SYSTEM_PROMPT = """You are SilentGPT — a privacy-first AI assistant.
-Key rules you must follow:
-1. Search results will be provided to you; use them to give accurate, up-to-date answers.
-2. Never ask the user to share personal information.
-3. Never reveal that you are storing anything — because you are not.
-4. Be concise, helpful, and honest.
-5. If search results are empty, answer from your training knowledge and say so.
-6. Always end your response with: "🔒 Your query has been permanently deleted from our systems."
+
+Rules:
+1. Be concise, helpful, and natural.
+2. If search results are provided, use them for accurate answers.
+3. Do not mention data deletion, privacy policies, or system messages in every reply.
+4. Never ask the user for personal information.
+5. Answer normally like a helpful assistant.
 """
 
 
@@ -88,9 +88,25 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
 
 # ── Vision / Image analysis ───────────────────────────────────────────────────
 
+IMAGE_ANALYSIS_PROMPT = """Analyze this image carefully and respond in this structure:
+
+1. **What it is** — brief identification
+2. **Key details** — important elements, text, logos, people, objects
+3. **Meaning / purpose** — what this image is trying to communicate
+4. **Quality check** — blur, lighting, contrast, clutter, readability issues
+5. **Editing advice** — only if useful. Pick from:
+   - remove background
+   - increase brightness / contrast
+   - sharpen
+   - crop
+   - no edit needed
+
+Be clear and practical. Do not only list colors and shapes."""
+
+
 async def analyse_image(
     image_bytes: bytes,
-    instruction: str = "Describe this image in detail.",
+    instruction: str | None = None,
     model: str | None = None,
 ) -> str:
     """
@@ -104,13 +120,34 @@ async def analyse_image(
     """
     model = model or settings.OLLAMA_VISION_MODEL
 
+    # Use structured prompt whenever no text or generic prompt like "what is this" is given
+    clean_instr = (instruction or "").strip().lower().rstrip(".?!")
+    generic_prompts = {
+        "",
+        "describe this image in detail",
+        "describe this image",
+        "describe image",
+        "what is this",
+        "what is this image",
+        "what is this picture",
+        "what is in this image",
+        "analyze this image",
+        "analyze this",
+        "explain this image",
+        "tell me about this image",
+    }
+    if clean_instr in generic_prompts:
+        prompt_text = IMAGE_ANALYSIS_PROMPT
+    else:
+        prompt_text = instruction.strip()
+
     # Encode image to base64 (stays in RAM)
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
     payload = {
         "model": model,
         "system": _SYSTEM_PROMPT,
-        "prompt": instruction,
+        "prompt": prompt_text,
         "images": [b64_image],   # Ollama vision API field
         "stream": False,
         "options": {
@@ -150,100 +187,64 @@ async def is_ollama_healthy() -> bool:
 
 # ── Document & Presentation Content Generation ───────────────────────────────
 
-async def generate_document_content(topic: str) -> dict:
-    """
-    Ask Ollama to create structured content for a Word document.
-    Returns: { "title": "...", "sections": [{"heading": "...", "content": "..."}] }
-    """
-    prompt = f"""
-Create a well-structured educational document on the topic: "{topic}".
+async def generate_document_content(instructions: str) -> dict:
+    prompt = f"""Create a well-structured document based on this user request:
 
-Return ONLY valid JSON in this exact format (no extra text):
+USER REQUEST:
+{instructions}
 
+Return ONLY valid JSON in this exact format:
 {{
   "title": "Document Title",
   "sections": [
     {{
-      "heading": "Introduction",
-      "content": "Write 2-3 paragraphs here..."
-    }},
-    {{
-      "heading": "Main Point 1",
-      "content": "Write detailed content here..."
-    }},
-    {{
-      "heading": "Main Point 2",
-      "content": "Write detailed content here..."
-    }},
-    {{
-      "heading": "Conclusion",
-      "content": "Write conclusion here..."
+      "heading": "Section heading",
+      "content": "Section body text..."
     }}
   ]
 }}
 
 Rules:
-- Make 4 to 6 sections
-- Content should be informative and clear
-- Do not add any text outside the JSON
+- Follow the user's requirements exactly (tone, length, audience, structure).
+- If user asks for concise/short: keep each section to 1 short paragraph.
+- If user asks for detailed/paragraphs: write fuller paragraphs (2–4 per major section).
+- If user asks academic/formal: use formal language.
+- If user asks simple/beginner: use simple language and examples.
+- If user lists sections to include, include them.
+- Make 4–8 sections unless user specifies otherwise.
+- No text outside the JSON.
 """
-
     raw = await generate_response(prompt)
     return _extract_json(raw)
 
 
-async def generate_presentation_content(topic: str) -> dict:
-    """
-    Ask Ollama to create structured content for a PowerPoint.
-    Returns: { "title": "...", "slides": [{"title": "...", "points": ["...", "..."]}] }
-    """
-    prompt = f"""
-Create a professional presentation on the topic: "{topic}".
+async def generate_presentation_content(instructions: str) -> dict:
+    prompt = f"""Create a professional presentation based on this user request:
 
-Return ONLY valid JSON in this exact format (no extra text):
+USER REQUEST:
+{instructions}
 
+Return ONLY valid JSON in this exact format:
 {{
   "title": "Presentation Title",
   "slides": [
     {{
-      "title": "Introduction",
-      "points": [
-        "Point 1",
-        "Point 2",
-        "Point 3"
-      ]
-    }},
-    {{
-      "title": "Key Concept 1",
-      "points": [
-        "Point 1",
-        "Point 2",
-        "Point 3"
-      ]
-    }},
-    {{
-      "title": "Key Concept 2",
-      "points": [
-        "Point 1",
-        "Point 2"
-      ]
-    }},
-    {{
-      "title": "Conclusion",
-      "points": [
-        "Summary point 1",
-        "Summary point 2"
-      ]
+      "title": "Slide title",
+      "points": ["Bullet 1", "Bullet 2", "Bullet 3"]
     }}
   ]
 }}
 
 Rules:
-- Make 5 to 8 slides
-- Each slide should have 3 to 5 short bullet points
-- Do not add any text outside the JSON
+- Follow the user's requirements exactly (tone, slide count, audience, style).
+- If user asks concise/short: max 3 short bullets per slide.
+- If user asks detailed: up to 5 bullets, still short enough for slides (not paragraphs).
+- If user specifies number of slides (e.g. 5 slides), respect that count.
+- If user asks for beginners: simple wording and examples.
+- If user asks formal/academic: more precise wording.
+- Default: 5–8 slides if not specified.
+- No text outside the JSON.
 """
-
     raw = await generate_response(prompt)
     return _extract_json(raw)
 

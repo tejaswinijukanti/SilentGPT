@@ -116,7 +116,7 @@
         </aside>
 
         <!-- MAIN CHAT -->
-        <main class="chat-main" id="chat-main">
+        <main class="chat-main" id="chat-panel" style="position: relative;">
 
           <!-- Topbar -->
           <div class="chat-topbar" id="chat-topbar">
@@ -165,6 +165,14 @@
             <div class="chat-footer-note">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L8 6H4v4l-2 2 2 2v4h4l4 4 4-4h4v-4l2-2-2-2V6h-4L12 2Z" stroke="#4ade80" stroke-width="2" stroke-linejoin="round"/></svg>
               <span>Encrypted · Zero retention · Not stored · Not used for training</span>
+            </div>
+          </div>
+
+          <div id="drop-overlay" class="drop-overlay">
+            <div class="drop-overlay-inner">
+              <div class="drop-icon">📎</div>
+              <div class="drop-title">Attach to message</div>
+              <div class="drop-sub">Drop here to add files to your message</div>
             </div>
           </div>
 

@@ -1547,3 +1547,48 @@ body.chat-lock {
 .edit-btn:active {
   transform: scale(0.97);
 }
+
+/* ==========================================
+   CHATGPT-STYLE DRAG & DROP OVERLAY
+   ========================================== */
+#chat-panel {
+  position: relative;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  display: none; /* hidden by default */
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 8, 16, 0.92);
+  border: 2px dashed rgba(167, 139, 250, 0.7);
+  border-radius: 12px;
+  pointer-events: none;
+}
+
+.drop-overlay.active {
+  display: flex !important; /* only when dragging */
+}
+
+.drop-overlay-inner {
+  text-align: center;
+  color: #e9d5ff;
+}
+
+.drop-icon {
+  font-size: 40px;
+  margin-bottom: 12px;
+}
+
+.drop-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.drop-sub {
+  margin-top: 8px;
+  font-size: 14px;
+  opacity: 0.7;
+}

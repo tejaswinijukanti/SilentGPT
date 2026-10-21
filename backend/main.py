@@ -123,6 +123,47 @@ User Question: {user_message}
 Answer clearly and concisely:"""
 
 
+def needs_web_search(message: str) -> bool:
+    """
+    Return True only when the message needs live internet search.
+    Casual conversation → False (fast local reply).
+    """
+    text = message.lower().strip()
+
+    # Casual phrases — do NOT search
+    casual = [
+        "hi", "hello", "hey", "good morning", "good evening", "good night",
+        "how are you", "what's up", "whats up", "thank you", "thanks",
+        "ok", "okay", "bye", "see you", "who are you", "what can you do",
+        "help", "what is your name", "yo", "sup"
+    ]
+
+    for phrase in casual:
+        if text == phrase or text.startswith(phrase + " ") or text.endswith(" " + phrase):
+            return False
+
+    # Very short messages without numbers → usually casual
+    if len(text.split()) <= 2 and not any(c.isdigit() for c in text):
+        return False
+
+    # Keywords that usually need live data
+    search_keywords = [
+        "current", "latest", "today", "now", "price", "news", "weather",
+        "stock", "who won", "score", "update", "recent", "live",
+        "bitcoin", "crypto", "gold rate", "dollar rate", "election",
+        "what happened", "breaking"
+    ]
+    if any(k in text for k in search_keywords):
+        return True
+
+    # Factual questions
+    question_starters = ["what", "who", "when", "where", "which", "how much", "how many"]
+    if any(text.startswith(q) for q in question_starters):
+        return True
+
+    return False
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get(
@@ -180,14 +221,14 @@ async def chat(
     response_text: str = ""
 
     try:
-        # Step 1 — Search the internet
-        # ZDR: query is a local variable; not logged or stored.
-        sources = await search_web(request.message)
+        # Smart decision: search only when needed
+        if needs_web_search(request.message):
+            sources = await search_web(request.message)
+            prompt = _build_chat_prompt(request.message, sources)
+        else:
+            # Normal conversation — no internet search
+            prompt = request.message
 
-        # Step 2 — Build prompt from numbered search results (in-memory only)
-        prompt = _build_chat_prompt(request.message, sources)
-
-        # Step 3 — Send to Ollama
         response_text = await generate_response(prompt, model=cfg.OLLAMA_MODEL)
 
         if not response_text:
@@ -198,19 +239,13 @@ async def chat(
 
     except HTTPException:
         raise
-
     except Exception as exc:
-        # Catch-all for search/network failures — surface a clean error
         logger.error("Chat endpoint error: %s", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while processing your request.",
         )
-
     finally:
-        # ── ZDR Cleanup ──────────────────────────────────────────
-        # Explicitly delete the prompt from RAM.
-        # Step 5 — Zero Data Retention: we do not store anything.
         del prompt
         gc.collect()
 
@@ -485,26 +520,18 @@ async def edit_image_natural(
 
 @app.post("/generate-document")
 async def generate_document_endpoint(request: dict):
-    """
-    Generate a Word document from a plain topic.
-    Body: { "topic": "Climate Change" }
-    """
-    topic = request.get("topic", "").strip()
-    if not topic:
-        raise HTTPException(status_code=400, detail="Topic is required")
+    topic = (request.get("topic") or "").strip()
+    instructions = (request.get("instructions") or topic).strip()
+    if not topic and not instructions:
+        raise HTTPException(status_code=400, detail="Topic or instructions required")
 
     try:
-        # 1. AI generates structured content
-        content = await generate_document_content(topic)
-
-        # 2. Create the actual Word file in memory
+        content = await generate_document_content(instructions)
         doc_bytes = create_document(
-            title=content.get("title", topic),
+            title=content.get("title") or topic or "Document",
             sections=content.get("sections", [])
         )
-
-        filename = content.get("title", topic).replace(" ", "_") + ".docx"
-
+        filename = (content.get("title") or topic or "SilentGPT_Document").replace(" ", "_") + ".docx"
         return Response(
             content=doc_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -516,26 +543,18 @@ async def generate_document_endpoint(request: dict):
 
 @app.post("/generate-presentation")
 async def generate_presentation_endpoint(request: dict):
-    """
-    Generate a PowerPoint presentation from a plain topic.
-    Body: { "topic": "Artificial Intelligence" }
-    """
-    topic = request.get("topic", "").strip()
-    if not topic:
-        raise HTTPException(status_code=400, detail="Topic is required")
+    topic = (request.get("topic") or "").strip()
+    instructions = (request.get("instructions") or topic).strip()
+    if not topic and not instructions:
+        raise HTTPException(status_code=400, detail="Topic or instructions required")
 
     try:
-        # 1. AI generates structured slides
-        content = await generate_presentation_content(topic)
-
-        # 2. Create the actual PowerPoint in memory
+        content = await generate_presentation_content(instructions)
         ppt_bytes = create_presentation(
-            title=content.get("title", topic),
+            title=content.get("title") or topic or "Presentation",
             slides_data=content.get("slides", [])
         )
-
-        filename = content.get("title", topic).replace(" ", "_") + ".pptx"
-
+        filename = (content.get("title") or topic or "SilentGPT_Presentation").replace(" ", "_") + ".pptx"
         return Response(
             content=ppt_bytes,
             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
