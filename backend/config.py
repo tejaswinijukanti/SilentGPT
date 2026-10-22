@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.1:8b"         # default text model
     OLLAMA_VISION_MODEL: str = "llama3.1:8b"  # vision/image model (or llava/phi3:vision)
 
+    # ── Gemini ──────────────────────────────────────────────────
+    GEMINI_API_KEY: str = ""
+
     # ── Web Search ──────────────────────────────────────────────
     # Set SEARCH_PROVIDER to "tavily" or "serper"
     SEARCH_PROVIDER: str = "tavily"

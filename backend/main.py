@@ -13,6 +13,7 @@ Run:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import os
 import gc
 import base64
 import logging
@@ -26,6 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from config import Settings, get_settings
+from gemini_edit import gemini_process_image, gemini_edit_image, is_advanced_edit
 from models import (
     ChatRequest, ChatResponse,
     ImageResponse,
@@ -85,6 +87,8 @@ app = FastAPI(
 # ── CORS ──────────────────────────────────────────────────────────────────────
 
 settings = get_settings()
+if settings.GEMINI_API_KEY and not os.getenv("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = settings.GEMINI_API_KEY
 
 app.add_middleware(
     CORSMiddleware,
@@ -257,101 +261,32 @@ async def chat(
     )
 
 
-@app.post(
-    "/image",
-    summary="Upload and analyse an image",
-    tags=["Image"],
-    responses={
-        200: {"description": "Analysis text or edited image (base64)"},
-        400: {"model": ErrorResponse, "description": "Invalid image"},
-        413: {"model": ErrorResponse, "description": "Image too large"},
-        500: {"model": ErrorResponse, "description": "Processing error"},
-    },
-)
-async def analyse_image_endpoint(
-    file: UploadFile = File(..., description="Image file to analyse"),
-    instruction: str = Form(
-        default="Describe this image in detail.",
-        max_length=500,
-        description="What you want the AI to do with the image.",
-    ),
-    cfg: Settings = Depends(get_settings),
+@app.post("/image")
+async def image_endpoint(
+    file: UploadFile = File(...),
+    instruction: str = Form(""),
+    message: str = Form(""),
 ):
-    """
-    Image analysis endpoint.
-
-    Flow:
-      1. Receive uploaded file into memory (never written to disk)
-      2. Validate file type and size
-      3. Send image bytes to Ollama vision model (or fallback to metadata)
-      4. Return AI analysis
-      5. Explicitly delete bytes from memory (ZDR)
-
-    ⚠️  ZDR Guarantee: the image is processed entirely in RAM.
-        It is never saved to disk, a database, or any external service
-        other than the local Ollama instance.
-    """
-    image_bytes: bytes | None = None
-    analysis: str = ""
-
+    image_bytes = await file.read()
+    text = (instruction or message or "Describe this image.").strip()
     try:
-        # Step 1 — Read file into memory
-        content_type = file.content_type or "application/octet-stream"
-        image_bytes = await file.read()
-
-        # Step 2 — Validate (raises on failure)
-        try:
-            validate_image(image_bytes, content_type)
-        except ImageTooLargeError as e:
-            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
-        except UnsupportedImageTypeError as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-        # Step 3 — Check if the instruction is a known image-editing action
-        action = detect_edit_action(instruction)
-
-        if action and image_bytes:
-            edited_bytes = process_image(image_bytes, action)
-            b64_image = base64.b64encode(edited_bytes).decode("utf-8")
-
-            return {
-                "type": "image",
-                "image": f"data:image/png;base64,{b64_image}",
-                "action": action
-            }
-
-        # Step 4 — Try vision LLM first; fall back to metadata description
-        try:
-            analysis = await analyse_image(
-                image_bytes=image_bytes,
-                instruction=instruction,
-                model=cfg.OLLAMA_VISION_MODEL,
-            )
-        except Exception:
-            logger.warning(
-                "Vision model '%s' unavailable — using metadata fallback.",
-                cfg.OLLAMA_VISION_MODEL,
-            )
-            metadata = extract_metadata(image_bytes)
-            analysis = build_fallback_description(metadata)
-
-    except HTTPException:
-        raise
-
-    except Exception:
-        logger.error("Image endpoint unexpected error.")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while processing the image.",
-        )
-
+        return await gemini_process_image(text, image_bytes=image_bytes)
+    except Exception as e:
+        return {"type": "text", "response": f"Image request failed: {e}"}
     finally:
-        # ── ZDR Cleanup ──────────────────────────────────────────
-        if image_bytes is not None:
-            del image_bytes   # drop the bytes from RAM
+        del image_bytes
         gc.collect()
 
-    return ImageResponse(analysis=analysis, private=True)
+
+@app.post("/generate-image")
+async def generate_image_endpoint(request: dict):
+    prompt = (request.get("prompt") or request.get("message") or "").strip()
+    if not prompt:
+        return {"type": "text", "response": "Describe the image you want."}
+    try:
+        return await gemini_process_image(prompt, image_bytes=None)
+    except Exception as e:
+        return {"type": "text", "response": f"Image generation failed: {e}"}
 
 
 
@@ -462,6 +397,8 @@ async def edit_image(
 async def edit_image_natural(
     file: UploadFile = File(...),
     message: str = Form(""),
+    instruction: str = Form(""),
+    cfg: Settings = Depends(get_settings),
 ):
     """
     Accept an image and a plain-English instruction.
@@ -476,10 +413,28 @@ async def edit_image_natural(
     ZDR: image bytes are deleted from memory after processing.
     """
     image_bytes = None
+    inst = (instruction or message or "").strip()
 
     try:
         image_bytes = await file.read()
-        action = detect_edit_action(message)
+
+        # Advanced edit → Gemini
+        gemini_key = os.getenv("GEMINI_API_KEY") or cfg.GEMINI_API_KEY
+        if inst and is_advanced_edit(inst) and gemini_key:
+            try:
+                edited_bytes = await gemini_edit_image(image_bytes, inst)
+                b64 = base64.b64encode(edited_bytes).decode("utf-8")
+                return {
+                    "type": "image",
+                    "image": f"data:image/png;base64,{b64}",
+                    "action": "gemini_edit",
+                    "message": "Edited with Gemini",
+                }
+            except Exception as e:
+                logger.error("Gemini edit failed: %s", e)
+                # fall through to local
+
+        action = detect_edit_action(inst)
 
         if not action:
             return {

@@ -22,6 +22,17 @@ const state = {
 };
 
 /* ==========================================
+   IMAGE GENERATION REQUEST DETECTION
+   ========================================== */
+function isImageGenerateRequest(text) {
+  const t = (text || "").toLowerCase();
+  return (
+    /\b(generate|create|make|draw)\b/.test(t) &&
+    /\b(image|picture|photo|illustration|invitation|poster)\b/.test(t)
+  );
+}
+
+/* ==========================================
    DOCUMENT & PRESENTATION DETECTION / GENERATION
    ========================================== */
 function detectFileRequest(message) {
@@ -449,10 +460,28 @@ async function sendMessage() {
   if (state.isResponding) return;
 
   const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("send-btn");
   const text = (input ? input.value.trim() : "");
   const image = state.pendingImage;
-  const imageFile = state.pendingImageFile;
-  if (!text && !image) return;
+  let imageFile = state.pendingImageFile;
+  if (!text && !image && !imageFile) return;
+
+  // Reconstruct File object from base64 data URL if imageFile is missing
+  if (!imageFile && image && typeof image === "string" && image.startsWith("data:")) {
+    try {
+      const arr = image.split(",");
+      const mime = (arr[0].match(/:(.*?);/) || [])[1] || "image/png";
+      const bstr = atob(arr[1]);
+      let n = bstr.length;
+      const u8arr = new Uint8Array(n);
+      while (n--) {
+        u8arr[n] = bstr.charCodeAt(n);
+      }
+      imageFile = new File([u8arr], "uploaded_image.png", { type: mime });
+    } catch (e) {
+      console.warn("Could not convert data URL to File:", e);
+    }
+  }
 
   // Clear input field and image preview
   if (input) { input.value = ""; autoResize(input); }
@@ -476,11 +505,57 @@ async function sendMessage() {
   appendMessage(userMsg, true);
   saveCurrentToHistory();
 
-  // NEW: file generation short-circuit
-  const fileRequest = detectFileRequest(text);
-  if (fileRequest) {
-    await handleFileGeneration(fileRequest.type, fileRequest.topic, text);
-    return;
+  // ===== IMAGE GENERATION (text only, no upload) =====
+  if (!imageFile && !image && isImageGenerateRequest(text)) {
+    const typingId = showTyping();
+    state.isResponding = true;
+    if (sendBtn) sendBtn.disabled = true;
+    try {
+      const res = await fetch(`${API_BASE}/generate-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: text, message: text }),
+      });
+      const data = await res.json();
+      removeTyping(typingId);
+
+      if (data.type === "image" && data.image) {
+        showEditedImage(data.image, "generate");
+        state.pendingImage = data.image;
+        try {
+          const resBlob = await fetch(data.image);
+          const blob = await resBlob.blob();
+          state.pendingImageFile = new File([blob], "generated_image.png", { type: "image/png" });
+        } catch (e) {}
+        showImagePreview(data.image);
+        const aiMsg = { role: "ai", text: `✅ Generated: ${data.response || "Done."}`, isHTML: false };
+        state.messages.push(aiMsg);
+        saveCurrentToHistory();
+      } else {
+        appendMessage({
+          role: "ai",
+          text: data.response || "Could not generate image.",
+        }, true);
+      }
+    } catch (e) {
+      removeTyping(typingId);
+      console.error(e);
+      appendMessage({ role: "ai", text: "Image generation failed." }, true);
+    } finally {
+      if (sendBtn) sendBtn.disabled = false;
+      state.isResponding = false;
+    }
+    return; // critical — do not call /chat
+  }
+  // ===== END =====
+
+  // File generation short-circuit (only when NO image is attached)
+  if (!imageFile && !image) {
+    const fileRequest = detectFileRequest(text);
+    if (fileRequest) {
+      await handleFileGeneration(fileRequest.type, fileRequest.topic, text);
+      return;
+    }
   }
 
   // Show thinking animation while waiting for backend
@@ -488,17 +563,17 @@ async function sendMessage() {
   state.isResponding = true;
 
   // Disable send button during request
-  const sendBtn = document.getElementById("send-btn");
   if (sendBtn) sendBtn.disabled = true;
 
   let aiResponse = "";
 
   try {
     if (imageFile) {
-      // --- Image: POST http://localhost:8000/image (multipart) ---
+      // image present → ONLY /image + Gemini
       const formData = new FormData();
       formData.append("file", imageFile);
-      if (text) formData.append("instruction", text);
+      formData.append("instruction", text || "Describe this image.");
+      formData.append("message", text || "Describe this image.");
 
       const res = await fetch(`${API_BASE}/image`, {
         method: "POST",
@@ -510,56 +585,38 @@ async function sendMessage() {
       }
       const data = await res.json();
 
-      // Backend ran detect_edit_action — render the edited image inline
-      const action = detect_edit_action(text);
-
-      if (action && data.image) {
-        let edited_bytes = data.image;
-        let b64_image = data.image;
+      if (data.type === "image" && data.image) {
+        showEditedImage(data.image, "gemini");
 
         // Update state so follow-up edits use the new image
         state.pendingImage = data.image;
-        const resBlob = await fetch(data.image);
-        const blob = await resBlob.blob();
-        state.pendingImageFile = new File([blob], `edited_${data.action}.png`, { type: "image/png" });
-
-        // Render edited image bubble in chat
-        removeTyping(typingId);
-        if (sendBtn) sendBtn.disabled = false;
-
-        const container = document.getElementById("chat-messages");
-        const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const avatarUid = `av-${Date.now()}`;
-        const el = document.createElement("div");
-        el.className = "message ai";
-        el.innerHTML = `
-          <div class="message-row">
-            ${makeAvatarHTML("done", avatarUid)}
-            <div class="message-bubble" style="padding:10px;">
-              <img src="${escAttr(data.image)}" alt="Edited image"
-                   style="max-width:280px;border-radius:12px;display:block;margin-bottom:8px;"/>
-              <a href="${escAttr(data.image)}" download="silentgpt-edited-${escAttr(data.action)}.png"
-                 style="display:inline-block;padding:6px 12px;border-radius:8px;
-                        background:rgba(139,92,246,0.25);color:#e9d5ff;font-size:13px;
-                        text-decoration:none;border:1px solid rgba(167,139,250,0.4);">
-                ⬇ Download Image
-              </a>
-            </div>
-          </div>
-          <span class="message-time">${time}</span>
-        `;
-        container.appendChild(el);
-        scrollToBottom();
+        try {
+          const resBlob = await fetch(data.image);
+          const blob = await resBlob.blob();
+          state.pendingImageFile = new File([blob], "edited_gemini.png", { type: "image/png" });
+        } catch (e) {
+          console.warn("Could not sync pendingImageFile:", e);
+        }
         showImagePreview(data.image);
 
-        const aiEditMsg = { role: "ai", text: `✅ Applied: ${data.action}`, isHTML: false };
+        const aiEditMsg = { role: "ai", text: `✅ Applied: ${data.response || "Done."}`, isHTML: false };
         state.messages.push(aiEditMsg);
         saveCurrentToHistory();
+        removeTyping(typingId);
+        if (sendBtn) sendBtn.disabled = false;
         state.isResponding = false;
         return;
+      } else {
+        removeTyping(typingId);
+        if (sendBtn) sendBtn.disabled = false;
+        state.isResponding = false;
+        const replyText = cleanAIReply(data.response || "No result");
+        const aiMsg = { role: "ai", text: replyText };
+        state.messages.push(aiMsg);
+        appendMessage(aiMsg, true);
+        saveCurrentToHistory();
+        return;
       }
-
-      aiResponse = data.analysis || "No analysis returned.";
 
     } else {
       // --- Text: POST http://localhost:8000/chat (JSON) ---
@@ -934,6 +991,25 @@ async function editImage(action) {
   textarea.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
+  textarea.addEventListener("paste", (e) => {
+    const items = (e.clipboardData || e.originalEvent?.clipboardData)?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.indexOf("image") !== -1) {
+        const file = item.getAsFile();
+        if (file) {
+          state.pendingImageFile = file;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            state.pendingImage = ev.target.result;
+            showImagePreview(ev.target.result);
+          };
+          reader.readAsDataURL(file);
+          break;
+        }
+      }
+    }
+  });
 })();
 
 function autoResize(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 160) + "px"; }
@@ -1026,11 +1102,51 @@ async function handleSend() {
     setTimeout(() => welcome.remove(), 200);
   }
 
-  // Document / Presentation request
-  const fileRequest = detectFileRequest(userInput);
-  if (fileRequest) {
-    await handleFileGeneration(fileRequest.type, fileRequest.topic, userInput);
-    return; // do not fall through to /chat
+  // Image generation request
+  if (!state.pendingImageFile && !state.pendingImage && isImageGenerateRequest(userInput)) {
+    const typingId = showTyping();
+    state.isResponding = true;
+    if (sendBtn) sendBtn.disabled = true;
+    try {
+      const res = await fetch(`${API_BASE}/generate-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: userInput }),
+      });
+      const data = await res.json();
+      removeTyping(typingId);
+      if (data.type === "image" && data.image) {
+        showEditedImage(data.image, "generate");
+        state.pendingImage = data.image;
+        try {
+          const resBlob = await fetch(data.image);
+          const blob = await resBlob.blob();
+          state.pendingImageFile = new File([blob], "generated_image.png", { type: "image/png" });
+        } catch (e) {}
+        showImagePreview(data.image);
+        const aiMsg = { role: "ai", text: `✅ Generated: ${data.response || "Done."}`, isHTML: false };
+        state.messages.push(aiMsg);
+        saveCurrentToHistory();
+      } else {
+        appendMessage({ role: "ai", text: data.response || "Failed" }, true);
+      }
+    } catch (e) {
+      removeTyping(typingId);
+      appendMessage({ role: "ai", text: "Image generation error." }, true);
+    } finally {
+      if (sendBtn) sendBtn.disabled = false;
+      state.isResponding = false;
+    }
+    return;
+  }
+
+  // Document / Presentation request (only when no image attached)
+  if (!state.pendingImageFile && !state.pendingImage) {
+    const fileRequest = detectFileRequest(userInput);
+    if (fileRequest) {
+      await handleFileGeneration(fileRequest.type, fileRequest.topic, userInput);
+      return; // do not fall through to /chat
+    }
   }
 
   let typingId = showTyping();
@@ -1042,12 +1158,13 @@ async function handleSend() {
     let response, data;
 
     if (state.pendingImageFile) {
-      // Image + natural-language instruction → /edit-image-natural
+      // image present → ONLY /image + Gemini
       const formData = new FormData();
       formData.append("file", state.pendingImageFile);
-      formData.append("message", userInput);
+      formData.append("instruction", userInput || "Describe this image.");
+      formData.append("message", userInput || "Describe this image.");
 
-      response = await fetch(`${API_BASE}/edit-image-natural`, {
+      response = await fetch(`${API_BASE}/image`, {
         method: "POST",
         body: formData,
       });
@@ -1063,23 +1180,25 @@ async function handleSend() {
     data = await response.json();
     removeTyping(typingId);
 
-    if (data.type === "image") {
-      // Backend detected and applied an edit action
-      showEditedImage(data.image, data.action);
+    if (data.type === "image" && data.image) {
+      showEditedImage(data.image, "gemini");
 
       // Keep state in sync so follow-up edits chain
       state.pendingImage = data.image;
-      const resBlob = await fetch(data.image);
-      const blob = await resBlob.blob();
-      state.pendingImageFile = new File([blob], `edited_${data.action}.png`, { type: "image/png" });
+      try {
+        const resBlob = await fetch(data.image);
+        const blob = await resBlob.blob();
+        state.pendingImageFile = new File([blob], "edited_gemini.png", { type: "image/png" });
+      } catch (e) {
+        console.warn("Could not sync pendingImageFile:", e);
+      }
       showImagePreview(data.image);
 
-      const aiMsg = { role: "ai", text: `✅ Applied: ${data.action}`, isHTML: false };
+      const aiMsg = { role: "ai", text: `✅ Applied: ${data.response || "Done."}`, isHTML: false };
       state.messages.push(aiMsg);
       saveCurrentToHistory();
     } else {
-      // Normal text reply (or fallback hint from /edit-image-natural)
-      const replyText = cleanAIReply(data.response || data.analysis || "No response returned.");
+      const replyText = cleanAIReply(data.response || "No result");
       const aiMsg = { role: "ai", text: replyText };
       state.messages.push(aiMsg);
       appendMessage(aiMsg, true);
