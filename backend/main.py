@@ -35,7 +35,14 @@ from models import (
     SearchSource,
 )
 from search import search_web
-from ai import generate_response, analyse_image, is_ollama_healthy
+from ai import (
+    generate_response,
+    generate_response_with_model,
+    analyse_image,
+    is_ollama_healthy,
+    is_groq_healthy,
+    is_gemini_healthy,
+)
 from image_handler import (
     validate_image, extract_metadata, build_fallback_description,
     process_image, detect_edit_action, SUPPORTED_ACTIONS,
@@ -63,12 +70,14 @@ logger = logging.getLogger("silentgpt")
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
     cfg = get_settings()
+    has_groq = bool(os.getenv("GROQ_API_KEY", "").strip() or cfg.GROQ_API_KEY.strip())
     has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip())
     logger.info("SilentGPT backend starting — Zero Data Retention mode: %s", cfg.ZERO_DATA_RETENTION)
-    if has_gemini:
-        logger.info("Primary AI Provider: Google Gemini API (%s)", cfg.GEMINI_MODEL)
-    else:
-        logger.info("Primary AI Provider: Local Ollama (%s at %s)", cfg.OLLAMA_MODEL, cfg.OLLAMA_BASE_URL)
+    logger.info(
+        "Hybrid Architecture: Text/Docs -> Groq (%s) [Gemini failover], Images -> Gemini (%s)",
+        cfg.GROQ_MODEL if has_groq else "(groq unconfigured)",
+        cfg.GEMINI_MODEL if has_gemini else "(gemini unconfigured)",
+    )
     yield
     logger.info("SilentGPT backend shutting down.")
 
@@ -93,6 +102,8 @@ app = FastAPI(
 settings = get_settings()
 if settings.GEMINI_API_KEY and not os.getenv("GEMINI_API_KEY"):
     os.environ["GEMINI_API_KEY"] = settings.GEMINI_API_KEY
+if settings.GROQ_API_KEY and not os.getenv("GROQ_API_KEY"):
+    os.environ["GROQ_API_KEY"] = settings.GROQ_API_KEY
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,18 +196,21 @@ async def health_check(cfg: Settings = Depends(get_settings)):
     Returns server status and dependency connectivity.
     Safe to expose publicly — returns no user data.
     """
+    groq_ok = bool(os.getenv("GROQ_API_KEY", "").strip() or cfg.GROQ_API_KEY.strip())
     gemini_ok = bool(os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip())
-    # In cloud environments with Gemini configured, avoid waiting on local Ollama connection
-    ollama_ok = (await is_ollama_healthy()) if not gemini_ok else False
+    ollama_ok = (await is_ollama_healthy()) if not (groq_ok or gemini_ok) else False
     search_ok = bool(cfg.TAVILY_API_KEY or cfg.SERPER_API_KEY)
+
+    primary = "groq" if groq_ok else ("gemini" if gemini_ok else "ollama")
 
     return HealthResponse(
         status="ok",
-        ollama_connected=gemini_ok or ollama_ok,
+        ollama_connected=groq_ok or gemini_ok or ollama_ok,
         search_configured=search_ok,
         zero_data_retention=True,
+        groq_configured=groq_ok,
         gemini_configured=gemini_ok,
-        primary_provider="gemini" if gemini_ok else "ollama",
+        primary_provider=primary,
     )
 
 
@@ -221,7 +235,7 @@ async def chat(
       1. Receive user message (validated by Pydantic, never logged)
       2. Search the web for relevant information
       3. Build a prompt combining search results + user question
-      4. Send prompt to primary AI provider (Google Gemini API with Ollama fallback)
+      4. Send prompt to primary AI provider (Groq API with Gemini failover)
       5. Return AI response + source URLs
       6. All local variables are discarded (ZDR)
 
@@ -231,8 +245,7 @@ async def chat(
     sources: list[SearchSource] = []
     prompt: str = ""
     response_text: str = ""
-    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip())
-    active_model = cfg.GEMINI_MODEL if has_gemini else cfg.OLLAMA_MODEL
+    active_model: str = ""
 
     try:
         # Smart decision: search only when needed
@@ -243,7 +256,7 @@ async def chat(
             # Normal conversation — no internet search
             prompt = request.message
 
-        response_text = await generate_response(prompt, model=active_model)
+        response_text, active_model = await generate_response_with_model(prompt)
 
         if not response_text:
             raise HTTPException(
@@ -255,9 +268,13 @@ async def chat(
         raise
     except Exception as exc:
         logger.error("Chat endpoint error: %s: %s", type(exc).__name__, exc)
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while processing your request: {exc}",
+            content={
+                "detail": f"An error occurred while processing your request: {exc}",
+                "error": str(exc),
+                "private": True,
+            },
         )
     finally:
         del prompt
@@ -289,10 +306,33 @@ async def image_endpoint(
 
 
 @app.post("/generate-image")
-async def generate_image_endpoint(request: dict):
+async def generate_image_endpoint(request: dict, cfg: Settings = Depends(get_settings)):
     prompt = (request.get("prompt") or request.get("message") or "").strip()
     if not prompt:
-        return {"error": "Describe the image you want.", "type": "text", "response": "Describe the image you want."}
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Describe the image you want.",
+                "detail": "Describe the image you want.",
+                "type": "text",
+                "response": "Describe the image you want.",
+                "private": True,
+            },
+        )
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip()
+    if not gemini_key:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Image generation requires GEMINI_API_KEY to be configured.",
+                "detail": "Image generation requires GEMINI_API_KEY to be configured.",
+                "type": "text",
+                "response": "Image generation requires GEMINI_API_KEY to be configured.",
+                "private": True,
+            },
+        )
+
     try:
         img_bytes = gemini_generate_image(prompt)
         b64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -300,15 +340,21 @@ async def generate_image_endpoint(request: dict):
             "image": f"data:image/png;base64,{b64}",
             "action": "generate",
             "type": "image",
-            "response": "Done."
+            "response": "Done.",
+            "private": True,
         }
     except Exception as e:
         logger.error("Gemini generate failed: %s", e)
-        return {
-            "error": f"Image generation failed: {e}",
-            "type": "text",
-            "response": f"Image generation failed: {e}"
-        }
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Image generation failed: {e}",
+                "detail": f"Image generation failed: {e}",
+                "type": "text",
+                "response": f"Image generation failed: {e}",
+                "private": True,
+            },
+        )
 
 
 
@@ -495,24 +541,38 @@ async def edit_image_natural(
 
 # ── Document & Presentation Generation (AI-powered) ────────────────────────
 
+@app.post("/generate-doc")
 @app.post("/generate-document")
 async def generate_document_endpoint(request: dict):
     topic = (request.get("topic") or "").strip()
-    instructions = (request.get("instructions") or topic).strip()
+    instructions = (request.get("instructions") or request.get("prompt") or topic).strip()
     if not topic and not instructions:
-        raise HTTPException(status_code=400, detail="Topic or instructions required")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Topic or instructions required", "error": "Topic or instructions required", "private": True},
+        )
 
     try:
         content = await generate_document_content(instructions)
         doc_bytes = create_document(
             title=content.get("title") or topic or "Document",
-            sections=content.get("sections", [])
+            sections=content.get("sections", []),
         )
         filename = (content.get("title") or topic or "SilentGPT_Document").replace(" ", "_") + ".docx"
         return Response(
             content=doc_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        logger.error("Document generation failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": f"Document generation failed: {exc}",
+                "error": str(exc),
+                "private": True,
+            },
         )
     finally:
         gc.collect()
@@ -521,21 +581,34 @@ async def generate_document_endpoint(request: dict):
 @app.post("/generate-presentation")
 async def generate_presentation_endpoint(request: dict):
     topic = (request.get("topic") or "").strip()
-    instructions = (request.get("instructions") or topic).strip()
+    instructions = (request.get("instructions") or request.get("prompt") or topic).strip()
     if not topic and not instructions:
-        raise HTTPException(status_code=400, detail="Topic or instructions required")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Topic or instructions required", "error": "Topic or instructions required", "private": True},
+        )
 
     try:
         content = await generate_presentation_content(instructions)
         ppt_bytes = create_presentation(
             title=content.get("title") or topic or "Presentation",
-            slides_data=content.get("slides", [])
+            slides_data=content.get("slides", []),
         )
         filename = (content.get("title") or topic or "SilentGPT_Presentation").replace(" ", "_") + ".pptx"
         return Response(
             content=ppt_bytes,
             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        logger.error("Presentation generation failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": f"Presentation generation failed: {exc}",
+                "error": str(exc),
+                "private": True,
+            },
         )
     finally:
         gc.collect()

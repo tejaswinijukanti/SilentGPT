@@ -29,5 +29,6 @@ onnxruntime>=1.20.0
 python-docx>=1.1.2
 python-pptx>=1.0.2
 
-# ── AI & Gemini SDK ────────────────────────────────────────────
-google-genai>=1.0.0
+# ── AI & Hybrid SDKs (Groq + Gemini) ───────────────────────────
+groq>=0.18.0
+google-genai>=1.0.0

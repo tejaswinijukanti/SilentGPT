@@ -48,8 +48,9 @@ class HealthResponse(BaseModel):
     ollama_connected: bool = Field(..., description="Whether AI provider is reachable.")
     search_configured: bool = Field(..., description="Whether a search API key is set.")
     zero_data_retention: bool = Field(True, description="Always True — ZDR is enforced.")
+    groq_configured: bool = Field(False, description="Whether Groq API key is configured.")
     gemini_configured: bool = Field(False, description="Whether Gemini API is configured.")
-    primary_provider: str = Field("gemini", description="Active primary AI provider.")
+    primary_provider: str = Field("groq", description="Active primary text AI provider.")
 
 
 # ── Error ─────────────────────────────────────────────────────────────────────

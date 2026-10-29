@@ -1,10 +1,15 @@
 """
 SilentGPT Backend — ai.py
-Primary AI client using Google Gemini API with fallback to local Ollama.
+Hybrid AI Architecture:
+  - Text & Document Generation (/chat, /generate-doc, PPT):
+    Primary Provider: Groq API (llama-3.3-70b-versatile, llama-3.1-8b-instant).
+    Failover: Google Gemini API (gemini-3.8-flash, etc.) on rate limits (429) or errors.
+  - Image Generation (/generate-image):
+    Routed exclusively through Google Gemini API.
 
 Zero Data Retention:
   - Prompts and images are built in-memory and passed ephemerally.
-  - No conversation history is recorded or stored.
+  - No conversation history, prompts, or messages are logged or stored.
   - Memory references are freed immediately once functions return.
 """
 
@@ -31,6 +36,18 @@ Rules:
 """
 
 
+def _get_groq_client():
+    key = os.getenv("GROQ_API_KEY", "").strip() or settings.GROQ_API_KEY.strip()
+    if not key:
+        return None
+    try:
+        from groq import AsyncGroq
+        return AsyncGroq(api_key=key)
+    except Exception as e:
+        logger.warning("Could not initialize Groq Client: %s", e)
+        return None
+
+
 def _get_gemini_client():
     key = os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip()
     if not key:
@@ -43,12 +60,53 @@ def _get_gemini_client():
         return None
 
 
-# ── Text generation ───────────────────────────────────────────────────────────
+# ── Text generation (Hybrid Groq + Gemini Failover) ──────────────────────────
 
-async def _generate_gemini_response(prompt: str, model: str | None = None) -> str:
+async def _generate_groq_response(prompt: str, model: str | None = None) -> tuple[str, str]:
+    """Execute text generation via Groq API statelessly."""
+    client = _get_groq_client()
+    if not client:
+        raise RuntimeError("GROQ_API_KEY not configured")
+
+    candidate_models = [
+        model if (model and "llama" in model.lower()) else settings.GROQ_MODEL,
+        settings.GROQ_MODEL,
+        settings.GROQ_FALLBACK_MODEL,
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+    ]
+    seen = set()
+    models_to_try = [m for m in candidate_models if m and not (m in seen or seen.add(m))]
+
+    last_err = None
+    for m in models_to_try:
+        try:
+            completion = await client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                model=m,
+                temperature=0.7,
+                max_tokens=2048,
+            )
+            if completion and completion.choices:
+                content = completion.choices[0].message.content or ""
+                if content.strip():
+                    return content.strip(), m
+        except Exception as e:
+            last_err = e
+            logger.warning("Groq model %s error: %s", m, type(e).__name__)
+            continue
+
+    raise RuntimeError(f"Groq text generation failed: {last_err}")
+
+
+async def _generate_gemini_response(prompt: str, model: str | None = None) -> tuple[str, str]:
+    """Execute text generation via Google Gemini API statelessly."""
     client = _get_gemini_client()
     if not client:
-        raise RuntimeError("GEMINI_API_KEY missing or invalid")
+        raise RuntimeError("GEMINI_API_KEY not configured")
 
     from google.genai import types
 
@@ -76,16 +134,17 @@ async def _generate_gemini_response(prompt: str, model: str | None = None) -> st
                 config=config,
             )
             if response and response.text:
-                return response.text.strip()
+                return response.text.strip(), model_name
         except Exception as e:
             last_err = e
-            logger.warning("Gemini model %s failed: %s", model_name, e)
+            logger.warning("Gemini model %s failed: %s", model_name, type(e).__name__)
             continue
 
-    raise RuntimeError(f"Gemini generation failed: {last_err}")
+    raise RuntimeError(f"Gemini text generation failed: {last_err}")
 
 
 async def _generate_ollama_response(prompt: str, model: str | None = None) -> str:
+    """Local offline Ollama generation fallback."""
     model = model or settings.OLLAMA_MODEL
 
     options = {
@@ -138,26 +197,46 @@ async def _generate_ollama_response(prompt: str, model: str | None = None) -> st
                 return data.get("response", "").strip()
 
 
-async def generate_response(prompt: str, model: str | None = None) -> str:
+async def generate_response_with_model(prompt: str, model: str | None = None) -> tuple[str, str]:
     """
-    Send a prompt to the primary AI provider (Google Gemini) and return generated text.
-    Zero Data Retention: Memory is freed immediately once response is sent.
+    Stateless text generation using hybrid architecture:
+      1. Primary: Groq API (llama-3.3-70b-versatile / llama-3.1-8b-instant).
+      2. Failover: Google Gemini API (gemini-3.8-flash, etc.) on rate limits or errors.
+      3. Offline Fallback: Local Ollama (if available).
     """
+    has_groq = bool(os.getenv("GROQ_API_KEY", "").strip() or settings.GROQ_API_KEY.strip())
     has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip())
 
-    if has_gemini or settings.PRIMARY_AI_PROVIDER.lower() == "gemini":
+    # Step 1: Try Groq as primary text provider
+    if has_groq:
+        try:
+            return await _generate_groq_response(prompt, model=model)
+        except Exception as exc:
+            logger.warning("Groq text generation failed: %s. Initiating Gemini failover...", type(exc).__name__)
+
+    # Step 2: Graceful failover to Gemini
+    if has_gemini:
         try:
             return await _generate_gemini_response(prompt, model=model)
-        except Exception as e:
-            logger.error("Primary Gemini generation error: %s", e)
-            # In hosted environments without local Ollama, don't attempt Ollama
-            if await is_ollama_healthy():
-                logger.info("Falling back to local Ollama...")
-                return await _generate_ollama_response(prompt, model=model)
-            raise e
+        except Exception as exc:
+            logger.warning("Gemini text failover failed: %s", type(exc).__name__)
 
-    # Fallback to local Ollama if no Gemini key is set
-    return await _generate_ollama_response(prompt, model=model)
+    # Step 3: Local Ollama fallback (pure offline mode only when neither cloud API is configured)
+    if not (has_groq or has_gemini) and await is_ollama_healthy():
+        try:
+            ans = await _generate_ollama_response(prompt, model=model)
+            return ans, settings.OLLAMA_MODEL
+        except Exception as exc:
+            logger.warning("Ollama fallback failed: %s", type(exc).__name__)
+
+    # Step 4: All providers failed
+    raise RuntimeError("Both Groq and Gemini APIs failed. Please check your API keys or rate limits.")
+
+
+async def generate_response(prompt: str, model: str | None = None) -> str:
+    """Compatibility wrapper returning generated text string."""
+    text, _ = await generate_response_with_model(prompt, model=model)
+    return text
 
 
 # ── Vision / Image analysis ───────────────────────────────────────────────────
@@ -253,7 +332,7 @@ async def _analyse_image_ollama(image_bytes: bytes, prompt_text: str, model: str
     return data.get("response", "").strip()
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Health checks ─────────────────────────────────────────────────────────────
 
 async def is_ollama_healthy() -> bool:
     """Ping Ollama to verify if it is running and reachable."""
@@ -265,6 +344,11 @@ async def is_ollama_healthy() -> bool:
             return resp.status_code == 200
     except Exception:
         return False
+
+
+def is_groq_healthy() -> bool:
+    """Check whether Groq API key is configured."""
+    return bool(os.getenv("GROQ_API_KEY", "").strip() or settings.GROQ_API_KEY.strip())
 
 
 def is_gemini_healthy() -> bool:
