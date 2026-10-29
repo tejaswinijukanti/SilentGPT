@@ -1,23 +1,22 @@
 """
 SilentGPT Backend — ai.py
-Ollama client for text generation and vision (image analysis).
-
-Model defaults:
-  - Text : phi3:mini   (fast, 3.8B, runs on CPU)
-  - Vision: phi3:vision (or swap for llava:7b)
+Primary AI client using Google Gemini API with fallback to local Ollama.
 
 Zero Data Retention:
-  - Prompts are built in-memory and passed directly to Ollama.
-  - No conversation history is sent (every request is fully stateless).
-  - The prompt string is garbage-collected as soon as the function returns.
+  - Prompts and images are built in-memory and passed ephemerally.
+  - No conversation history is recorded or stored.
+  - Memory references are freed immediately once functions return.
 """
 
+import os
 import json
 import re
 import httpx
 import base64
+import logging
 from config import get_settings
 
+logger = logging.getLogger("silentgpt")
 settings = get_settings()
 
 # System prompt that enforces SilentGPT's privacy persona.
@@ -32,17 +31,60 @@ Rules:
 """
 
 
+def _get_gemini_client():
+    key = os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip()
+    if not key:
+        return None
+    try:
+        from google import genai
+        return genai.Client(api_key=key)
+    except Exception as e:
+        logger.warning("Could not initialize google.genai Client: %s", e)
+        return None
+
+
 # ── Text generation ───────────────────────────────────────────────────────────
 
-async def generate_response(prompt: str, model: str | None = None) -> str:
-    """
-    Send a prompt to Ollama and return the generated text.
+async def _generate_gemini_response(prompt: str, model: str | None = None) -> str:
+    client = _get_gemini_client()
+    if not client:
+        raise RuntimeError("GEMINI_API_KEY missing or invalid")
 
-    Zero Data Retention (ZDR):
-      - `prompt` exists only in this request's ephemeral stack frame.
-      - No message history is retained or recorded.
-      - Memory is freed immediately once the response is sent.
-    """
+    from google.genai import types
+
+    candidate_models = [
+        model or settings.GEMINI_MODEL,
+        "gemini-3.8-flash",
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
+    ]
+    seen = set()
+    models_to_try = [m for m in candidate_models if m and not (m in seen or seen.add(m))]
+
+    last_err = None
+    for model_name in models_to_try:
+        try:
+            config = types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                temperature=0.7,
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+            if response and response.text:
+                return response.text.strip()
+        except Exception as e:
+            last_err = e
+            logger.warning("Gemini model %s failed: %s", model_name, e)
+            continue
+
+    raise RuntimeError(f"Gemini generation failed: {last_err}")
+
+
+async def _generate_ollama_response(prompt: str, model: str | None = None) -> str:
     model = model or settings.OLLAMA_MODEL
 
     options = {
@@ -50,7 +92,6 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
         "top_p": 0.9,
         "num_predict": 1024,
     }
-    # If the model exceeds the GPU's 6GB VRAM (e.g. 26b/27b/70b), run on CPU to avoid CUDA OOM
     if any(tag in model.lower() for tag in ["26b", "27b", "30b", "34b", "70b"]):
         options["num_gpu"] = 0
 
@@ -74,7 +115,6 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
             data = resp.json()
             return data.get("message", {}).get("content", "").strip()
         except Exception:
-            # Fallback retry: force CPU execution if GPU ran out of memory
             fallback_options = dict(options)
             fallback_options["num_gpu"] = 0
             chat_payload["options"] = fallback_options
@@ -95,6 +135,28 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
                 resp.raise_for_status()
                 data = resp.json()
                 return data.get("response", "").strip()
+
+
+async def generate_response(prompt: str, model: str | None = None) -> str:
+    """
+    Send a prompt to the primary AI provider (Google Gemini) and return generated text.
+    Zero Data Retention: Memory is freed immediately once response is sent.
+    """
+    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip())
+
+    if has_gemini:
+        try:
+            return await _generate_gemini_response(prompt, model=model)
+        except Exception as e:
+            logger.error("Primary Gemini generation error: %s", e)
+            # In hosted environments without local Ollama, don't attempt Ollama
+            if await is_ollama_healthy():
+                logger.info("Falling back to local Ollama...")
+                return await _generate_ollama_response(prompt, model=model)
+            raise e
+
+    # Fallback to local Ollama if no Gemini key is set
+    return await _generate_ollama_response(prompt, model=model)
 
 
 # ── Vision / Image analysis ───────────────────────────────────────────────────
@@ -121,45 +183,56 @@ async def analyse_image(
     model: str | None = None,
 ) -> str:
     """
-    Send an image (as raw bytes) to an Ollama vision model for analysis.
-
-    The image is base64-encoded in memory, sent to Ollama, and the
-    bytes reference is dropped immediately after the call returns.
-
-    ZDR NOTE: `image_bytes` is NOT written to disk at any point.
-              base64 string is a local variable discarded after the request.
+    Send an image to Gemini (primary) or Ollama (fallback) for vision analysis.
+    ZDR NOTE: image_bytes is NOT written to disk and discarded after request.
     """
-    model = model or settings.OLLAMA_VISION_MODEL
-
-    # Use structured prompt whenever no text or generic prompt like "what is this" is given
     clean_instr = (instruction or "").strip().lower().rstrip(".?!")
     generic_prompts = {
-        "",
-        "describe this image in detail",
-        "describe this image",
-        "describe image",
-        "what is this",
-        "what is this image",
-        "what is this picture",
-        "what is in this image",
-        "analyze this image",
-        "analyze this",
-        "explain this image",
+        "", "describe this image in detail", "describe this image",
+        "describe image", "what is this", "what is this image",
+        "what is this picture", "what is in this image",
+        "analyze this image", "analyze this", "explain this image",
         "tell me about this image",
     }
-    if clean_instr in generic_prompts:
-        prompt_text = IMAGE_ANALYSIS_PROMPT
-    else:
-        prompt_text = instruction.strip()
+    prompt_text = IMAGE_ANALYSIS_PROMPT if clean_instr in generic_prompts else (instruction or "Describe this image.").strip()
 
-    # Encode image to base64 (stays in RAM)
+    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip())
+    if has_gemini:
+        client = _get_gemini_client()
+        if client:
+            from google.genai import types
+            for m in ["gemini-3.8-flash", "gemini-2.5-flash-image", "gemini-3.1-flash-image"]:
+                try:
+                    resp = client.models.generate_content(
+                        model=m,
+                        contents=[
+                            prompt_text,
+                            types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                        ],
+                        config=types.GenerateContentConfig(
+                            system_instruction=_SYSTEM_PROMPT,
+                            temperature=0.5,
+                        ),
+                    )
+                    if resp and resp.text:
+                        return resp.text.strip()
+                except Exception as e:
+                    logger.warning("Gemini vision %s failed: %s", m, e)
+                    continue
+
+    # Fallback to Ollama vision if available
+    return await _analyse_image_ollama(image_bytes, prompt_text, model=model)
+
+
+async def _analyse_image_ollama(image_bytes: bytes, prompt_text: str, model: str | None = None) -> str:
+    model = model or settings.OLLAMA_VISION_MODEL
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
     payload = {
         "model": model,
         "system": _SYSTEM_PROMPT,
         "prompt": prompt_text,
-        "images": [b64_image],   # Ollama vision API field
+        "images": [b64_image],
         "stream": False,
         "options": {
             "temperature": 0.5,
@@ -175,25 +248,27 @@ async def analyse_image(
         resp.raise_for_status()
         data = resp.json()
 
-    # Explicitly clear large objects before returning
     del b64_image
-    del image_bytes
-
     return data.get("response", "").strip()
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
 async def is_ollama_healthy() -> bool:
-    """Ping Ollama to verify it is running and reachable."""
+    """Ping Ollama to verify if it is running and reachable."""
     try:
         async with httpx.AsyncClient(
-            base_url=settings.OLLAMA_BASE_URL, timeout=5.0
+            base_url=settings.OLLAMA_BASE_URL, timeout=2.0
         ) as client:
             resp = await client.get("/api/tags")
             return resp.status_code == 200
     except Exception:
         return False
+
+
+def is_gemini_healthy() -> bool:
+    """Check whether Gemini API key is configured."""
+    return bool(os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip())
 
 
 # ── Document & Presentation Content Generation ───────────────────────────────
@@ -263,10 +338,8 @@ Rules:
 def _extract_json(text: str) -> dict:
     """Safely extract JSON from the model response."""
     try:
-        # Try direct parse first
         return json.loads(text)
     except:
-        # Fallback: find JSON block inside the text
         match = re.search(r'\{[\s\S]*\}', text)
         if match:
             try:
@@ -274,4 +347,3 @@ def _extract_json(text: str) -> dict:
             except:
                 pass
     return {"title": "Generated Content", "sections": [], "slides": []}
-

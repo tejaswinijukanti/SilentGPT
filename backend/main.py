@@ -63,8 +63,12 @@ logger = logging.getLogger("silentgpt")
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
     cfg = get_settings()
+    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip())
     logger.info("SilentGPT backend starting — Zero Data Retention mode: %s", cfg.ZERO_DATA_RETENTION)
-    logger.info("Ollama URL: %s | Model: %s", cfg.OLLAMA_BASE_URL, cfg.OLLAMA_MODEL)
+    if has_gemini:
+        logger.info("Primary AI Provider: Google Gemini API (%s)", cfg.GEMINI_MODEL)
+    else:
+        logger.info("Primary AI Provider: Local Ollama (%s at %s)", cfg.OLLAMA_MODEL, cfg.OLLAMA_BASE_URL)
     yield
     logger.info("SilentGPT backend shutting down.")
 
@@ -181,14 +185,18 @@ async def health_check(cfg: Settings = Depends(get_settings)):
     Returns server status and dependency connectivity.
     Safe to expose publicly — returns no user data.
     """
-    ollama_ok = await is_ollama_healthy()
+    gemini_ok = bool(os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip())
+    # In cloud environments with Gemini configured, avoid waiting on local Ollama connection
+    ollama_ok = (await is_ollama_healthy()) if not gemini_ok else False
     search_ok = bool(cfg.TAVILY_API_KEY or cfg.SERPER_API_KEY)
 
     return HealthResponse(
         status="ok",
-        ollama_connected=ollama_ok,
+        ollama_connected=gemini_ok or ollama_ok,
         search_configured=search_ok,
         zero_data_retention=True,
+        gemini_configured=gemini_ok,
+        primary_provider="gemini" if gemini_ok else "ollama",
     )
 
 
@@ -199,7 +207,7 @@ async def health_check(cfg: Settings = Depends(get_settings)):
     tags=["Chat"],
     responses={
         500: {"model": ErrorResponse, "description": "AI or search error"},
-        503: {"model": ErrorResponse, "description": "Ollama not available"},
+        503: {"model": ErrorResponse, "description": "AI provider not available"},
     },
 )
 async def chat(
@@ -213,7 +221,7 @@ async def chat(
       1. Receive user message (validated by Pydantic, never logged)
       2. Search the web for relevant information
       3. Build a prompt combining search results + user question
-      4. Send prompt to Ollama (Phi-3 Mini by default)
+      4. Send prompt to primary AI provider (Google Gemini API with Ollama fallback)
       5. Return AI response + source URLs
       6. All local variables are discarded (ZDR)
 
@@ -223,6 +231,8 @@ async def chat(
     sources: list[SearchSource] = []
     prompt: str = ""
     response_text: str = ""
+    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or cfg.GEMINI_API_KEY.strip())
+    active_model = cfg.GEMINI_MODEL if has_gemini else cfg.OLLAMA_MODEL
 
     try:
         # Smart decision: search only when needed
@@ -233,21 +243,21 @@ async def chat(
             # Normal conversation — no internet search
             prompt = request.message
 
-        response_text = await generate_response(prompt, model=cfg.OLLAMA_MODEL)
+        response_text = await generate_response(prompt, model=active_model)
 
         if not response_text:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Ollama returned an empty response. Is the model loaded?",
+                detail="AI provider returned an empty response.",
             )
 
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("Chat endpoint error: %s", type(exc).__name__)
+        logger.error("Chat endpoint error: %s: %s", type(exc).__name__, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while processing your request.",
+            detail=f"An error occurred while processing your request: {exc}",
         )
     finally:
         del prompt
@@ -257,7 +267,7 @@ async def chat(
         response=response_text,
         sources=sources,
         private=True,
-        model=cfg.OLLAMA_MODEL,
+        model=active_model,
     )
 
 

@@ -31,7 +31,7 @@ class ChatResponse(BaseModel):
         description="Web sources used to generate the answer.",
     )
     private: bool = Field(True, description="Always True — no data was retained.")
-    model: str = Field("", description="Ollama model used.")
+    model: str = Field("", description="AI model used.")
 
 
 # ── Image ─────────────────────────────────────────────────────────────────────
@@ -45,9 +45,11 @@ class ImageResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = Field("ok", description="'ok' when the server is running.")
-    ollama_connected: bool = Field(..., description="Whether Ollama is reachable.")
+    ollama_connected: bool = Field(..., description="Whether AI provider is reachable.")
     search_configured: bool = Field(..., description="Whether a search API key is set.")
     zero_data_retention: bool = Field(True, description="Always True — ZDR is enforced.")
+    gemini_configured: bool = Field(False, description="Whether Gemini API is configured.")
+    primary_provider: str = Field("gemini", description="Active primary AI provider.")
 
 
 # ── Error ─────────────────────────────────────────────────────────────────────

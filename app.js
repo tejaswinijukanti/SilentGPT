@@ -1110,10 +1110,11 @@ async function checkBackendHealth() {
     if (res.ok) {
       const data = await res.json();
       console.log("SilentGPT backend status:", data);
-      if (data.ollama_connected) {
+      if (data.ollama_connected || data.gemini_configured) {
+        const label = data.gemini_configured ? "Gemini AI Ready" : "Ollama AI Ready";
         const statuses = document.querySelectorAll(".sidebar-status");
         statuses.forEach(s => {
-          s.innerHTML = `<span class="sidebar-status-dot" style="background:#4ade80;box-shadow:0 0 8px #4ade80;" aria-hidden="true"></span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L8 6H4v4l-2 2 2 2v4h4l4 4 4-4h4v-4l2-2-2-2V6h-4L12 2Z" stroke="#4ade80" stroke-width="2" stroke-linejoin="round"/></svg> Ollama AI Ready`;
+          s.innerHTML = `<span class="sidebar-status-dot" style="background:#4ade80;box-shadow:0 0 8px #4ade80;" aria-hidden="true"></span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L8 6H4v4l-2 2 2 2v4h4l4 4 4-4h4v-4l2-2-2-2V6h-4L12 2Z" stroke="#4ade80" stroke-width="2" stroke-linejoin="round"/></svg> ${label}`;
         });
       }
     }
