@@ -52,8 +52,9 @@ async def _generate_gemini_response(prompt: str, model: str | None = None) -> st
 
     from google.genai import types
 
+    gemini_model = model if (model and "gemini" in model.lower()) else settings.GEMINI_MODEL
     candidate_models = [
-        model or settings.GEMINI_MODEL,
+        gemini_model,
         "gemini-3.8-flash",
         "gemini-2.5-flash",
         "gemini-1.5-flash",
@@ -144,7 +145,7 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
     """
     has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip())
 
-    if has_gemini:
+    if has_gemini or settings.PRIMARY_AI_PROVIDER.lower() == "gemini":
         try:
             return await _generate_gemini_response(prompt, model=model)
         except Exception as e:
