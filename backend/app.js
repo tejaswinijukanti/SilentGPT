@@ -6,9 +6,10 @@
 "use strict";
 
 /* ---- API CONFIG ---- */
-const API_BASE = window.location.protocol.startsWith("http")
+// Use window.location.origin / relative paths without hardcoded local ports
+const API_BASE = (typeof window !== "undefined" && window.location && window.location.origin && window.location.origin !== "null")
   ? window.location.origin
-  : "http://localhost:8000";
+  : "";
 
 /* ---- STATE ---- */
 const state = {
