@@ -180,7 +180,7 @@ curl -X POST http://localhost:8000/image \
 ## Frontend Integration (JavaScript)
 
 ```javascript
-const API_URL = "http://localhost:8000";
+const API_URL = window.location.origin;
 
 // ── Chat ─────────────────────────────────────────────────────
 async function sendMessage(userMessage) {
