@@ -6,8 +6,8 @@
 "use strict";
 
 /* ---- API CONFIG ---- */
-const API_BASE = (window.location.protocol.startsWith("http") && window.location.port === "8000")
-  ? ""
+const API_BASE = window.location.protocol.startsWith("http")
+  ? window.location.origin
   : "http://localhost:8000";
 
 /* ---- STATE ---- */
@@ -648,7 +648,7 @@ async function sendMessage() {
       }
 
     } else {
-      // --- Text: POST http://localhost:8000/chat (JSON) ---
+      // --- Text: POST ${API_BASE}/chat (JSON) ---
       const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
