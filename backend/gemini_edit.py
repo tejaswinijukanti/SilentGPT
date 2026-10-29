@@ -13,14 +13,60 @@ def _client():
         except Exception:
             pass
     if not key:
-        raise RuntimeError("GEMINI_API_KEY not set")
+        raise RuntimeError("GEMINI_API_KEY missing")
     return genai.Client(api_key=key)
 
 
+def gemini_generate_image(prompt: str) -> bytes:
+    client = _client()
+
+    # Try these in order if one fails
+    models = ["gemini-2.5-flash-image", "gemini-3.1-flash-image"]
+    last_err = None
+
+    for model_name in models:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                ),
+            )
+
+            # ---- safe parsing ----
+            if not response:
+                raise RuntimeError("Empty response from Gemini")
+
+            candidates = getattr(response, "candidates", None)
+            if not candidates:
+                # blocked / safety / wrong model
+                raise RuntimeError(f"No candidates returned. Raw: {response}")
+
+            content = getattr(candidates[0], "content", None)
+            if not content or not getattr(content, "parts", None):
+                raise RuntimeError("No content parts in Gemini response")
+
+            for part in content.parts:
+                inline = getattr(part, "inline_data", None)
+                if inline and getattr(inline, "data", None):
+                    data = inline.data
+                    if isinstance(data, str):
+                        data = base64.b64decode(data)
+                    return data
+
+            raise RuntimeError("Gemini returned no image bytes")
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"Gemini generate failed: {last_err}")
+
+
 MODELS = [
-    "gemini-nano-banana-2.1",
-    "gemini-3.1-flash-image",
     "gemini-2.5-flash-image",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite-image",
 ]
 
 

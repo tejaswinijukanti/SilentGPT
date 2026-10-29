@@ -14,8 +14,8 @@ _ENV_FILE = Path(__file__).resolve().parent / ".env"
 class Settings(BaseSettings):
     # ── Ollama ──────────────────────────────────────────────────
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.1:8b"         # default text model
-    OLLAMA_VISION_MODEL: str = "llama3.1:8b"  # vision/image model (or llava/phi3:vision)
+    OLLAMA_MODEL: str = "gemma4:26b"          # default text model
+    OLLAMA_VISION_MODEL: str = "llava:latest" # vision/image model
 
     # ── Gemini ──────────────────────────────────────────────────
     GEMINI_API_KEY: str = ""

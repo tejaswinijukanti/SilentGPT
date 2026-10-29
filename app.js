@@ -401,6 +401,35 @@ function newChat() {
   setTimeout(() => { const input = document.getElementById("chat-input"); if (input) input.focus(); }, 200);
 }
 
+function downloadCurrentChat() {
+  const messages = state.messages || [];
+  if (!messages.length) {
+    alert("No messages to download");
+    return;
+  }
+
+  let text = "SilentGPT Chat Export\n";
+  text += "======================\n\n";
+
+  messages.forEach((m) => {
+    const role = m.role === "user" ? "You" : "SilentGPT";
+    const content = m.text || m.image || "[image]";
+    text += `${role}:\n${content}\n\n`;
+  });
+
+  text += "\n---\nZero Data Retention · Exported locally only\n";
+
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `SilentGPT_Chat_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function clearChat() {
   // Clear ALL history and current chat
   state.chatHistory = [];
@@ -519,8 +548,8 @@ async function sendMessage() {
       const data = await res.json();
       removeTyping(typingId);
 
-      if (data.type === "image" && data.image) {
-        showEditedImage(data.image, "generate");
+      if (data.image && !data.error) {
+        showEditedImage(data.image, data.action || "generate");
         state.pendingImage = data.image;
         try {
           const resBlob = await fetch(data.image);
@@ -534,7 +563,7 @@ async function sendMessage() {
       } else {
         appendMessage({
           role: "ai",
-          text: data.response || "Could not generate image.",
+          text: data.error || data.response || "Could not generate image.",
         }, true);
       }
     } catch (e) {
@@ -772,26 +801,49 @@ function typewriterEffect(el, text, speed) {
   writeNext();
 }
 
+let thinkingTimer = null;
+let thinkingStart = 0;
+
 function showTyping() {
   const container = document.getElementById("chat-messages");
   if (!container) return null;
   const id = `typing-${Date.now()}`;
+  thinkingStart = Date.now();
+
   const el = document.createElement("div");
-  el.className = "message ai"; el.id = id;
+  el.className = "message ai";
+  el.id = id;
   el.innerHTML = `
     <div class="message-row">
       ${makeAvatarHTML('thinking', `av-typing-${Date.now()}`)}
-      <div class="typing-indicator">
-        <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+      <div class="thinking-status">
+        <div class="thinking-dot"></div>
+        <span class="thinking-text">Working… 0.0s</span>
       </div>
     </div>
   `;
   container.appendChild(el);
   scrollToBottom();
+
+  if (thinkingTimer) clearInterval(thinkingTimer);
+  thinkingTimer = setInterval(() => {
+    const sec = ((Date.now() - thinkingStart) / 1000).toFixed(1);
+    const label = el.querySelector(".thinking-text");
+    if (label) label.textContent = `Working… ${sec}s`;
+  }, 100);
+
   return id;
 }
 
-function removeTyping(id) { if (!id) return; const el = document.getElementById(id); if (el) el.remove(); }
+function removeTyping(id) {
+  if (thinkingTimer) {
+    clearInterval(thinkingTimer);
+    thinkingTimer = null;
+  }
+  if (!id) return;
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
 function scrollToBottom() { const c = document.getElementById("chat-messages"); if (c) c.scrollTop = c.scrollHeight; }
 
 /* ==========================================
@@ -1115,8 +1167,8 @@ async function handleSend() {
       });
       const data = await res.json();
       removeTyping(typingId);
-      if (data.type === "image" && data.image) {
-        showEditedImage(data.image, "generate");
+      if (data.image && !data.error) {
+        showEditedImage(data.image, data.action || "generate");
         state.pendingImage = data.image;
         try {
           const resBlob = await fetch(data.image);
@@ -1128,7 +1180,7 @@ async function handleSend() {
         state.messages.push(aiMsg);
         saveCurrentToHistory();
       } else {
-        appendMessage({ role: "ai", text: data.response || "Failed" }, true);
+        appendMessage({ role: "ai", text: data.error || data.response || "Failed" }, true);
       }
     } catch (e) {
       removeTyping(typingId);
@@ -1323,6 +1375,72 @@ checkBackendHealth();
   });
 })();
 
+/* ==========================================
+   VOICE INPUT (Speech-to-Text)
+   ========================================== */
+let recognition = null;
+let isListening = false;
 
+function initVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    console.warn("Speech recognition not supported in this browser");
+    return;
+  }
 
+  recognition = new SR();
+  recognition.lang = "en-IN";
+  recognition.interimResults = true;
+  recognition.continuous = false;
+
+  recognition.onstart = () => {
+    isListening = true;
+    const btn = document.getElementById("voice-btn");
+    if (btn) btn.classList.add("listening");
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    const btn = document.getElementById("voice-btn");
+    if (btn) btn.classList.remove("listening");
+  };
+
+  recognition.onerror = (e) => {
+    console.error("Voice error:", e.error);
+    isListening = false;
+    const btn = document.getElementById("voice-btn");
+    if (btn) btn.classList.remove("listening");
+  };
+
+  recognition.onresult = (event) => {
+    let transcript = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript;
+    }
+    const input = document.getElementById("chat-input");
+    if (input) {
+      input.value = transcript.trim();
+      if (typeof autoResize === "function") autoResize(input);
+    }
+    // Auto-send when final result arrives
+    // if (event.results[event.results.length - 1].isFinal) sendMessage();
+  };
+}
+
+function toggleVoice() {
+  if (!recognition) {
+    alert("Voice input not supported. Please use Chrome or Edge.");
+    return;
+  }
+  if (isListening) {
+    recognition.stop();
+  } else {
+    recognition.start();
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  initVoice();
+  document.getElementById("voice-btn")?.addEventListener("click", toggleVoice);
+});
 

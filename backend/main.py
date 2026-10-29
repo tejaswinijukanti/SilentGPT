@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from config import Settings, get_settings
-from gemini_edit import gemini_process_image, gemini_edit_image, is_advanced_edit
+from gemini_edit import gemini_process_image, gemini_edit_image, is_advanced_edit, gemini_generate_image
 from models import (
     ChatRequest, ChatResponse,
     ImageResponse,
@@ -282,11 +282,23 @@ async def image_endpoint(
 async def generate_image_endpoint(request: dict):
     prompt = (request.get("prompt") or request.get("message") or "").strip()
     if not prompt:
-        return {"type": "text", "response": "Describe the image you want."}
+        return {"error": "Describe the image you want.", "type": "text", "response": "Describe the image you want."}
     try:
-        return await gemini_process_image(prompt, image_bytes=None)
+        img_bytes = gemini_generate_image(prompt)
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        return {
+            "image": f"data:image/png;base64,{b64}",
+            "action": "generate",
+            "type": "image",
+            "response": "Done."
+        }
     except Exception as e:
-        return {"type": "text", "response": f"Image generation failed: {e}"}
+        logger.error("Gemini generate failed: %s", e)
+        return {
+            "error": f"Image generation failed: {e}",
+            "type": "text",
+            "response": f"Image generation failed: {e}"
+        }
 
 
 

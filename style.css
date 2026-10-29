@@ -1166,6 +1166,81 @@ body.chat-lock {
   40% { transform: scale(1.1); opacity: 1; }
 }
 
+/* Shared icon button style (image upload + mic + any .icon-btn) */
+.upload-btn,
+#voice-btn,
+.icon-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e9d5ff;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.upload-btn:hover,
+#voice-btn:hover,
+.icon-btn:hover {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(167, 139, 250, 0.45);
+}
+
+.upload-btn svg,
+#voice-btn svg,
+.icon-btn svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+}
+
+/* Mic listening state */
+#voice-btn.listening {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(239, 68, 68, 0.55);
+  color: #fecaca;
+  animation: micPulse 1s infinite ease-in-out;
+}
+
+@keyframes micPulse {
+  0%, 100% { transform: scale(1); }
+  50%       { transform: scale(1.06); }
+}
+
+/* Thinking status with elapsed timer */
+.thinking-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  color: #e9d5ff;
+  font-size: 13px;
+  width: fit-content;
+  backdrop-filter: blur(12px);
+  animation: msgAppear 0.35s cubic-bezier(0.4,0,0.2,1) both;
+}
+.thinking-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #a78bfa;
+  box-shadow: 0 0 8px #a78bfa;
+  animation: pulse 1s infinite ease-in-out;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
 /* ---- WELCOME STATE ---- */
 .chat-welcome {
   display: flex;

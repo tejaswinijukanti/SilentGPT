@@ -45,6 +45,15 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
     """
     model = model or settings.OLLAMA_MODEL
 
+    options = {
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "num_predict": 1024,
+    }
+    # If the model exceeds the GPU's 6GB VRAM (e.g. 26b/27b/70b), run on CPU to avoid CUDA OOM
+    if any(tag in model.lower() for tag in ["26b", "27b", "30b", "34b", "70b"]):
+        options["num_gpu"] = 0
+
     chat_payload = {
         "model": model,
         "messages": [
@@ -52,16 +61,12 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
             {"role": "user", "content": prompt},
         ],
         "stream": False,
-        "options": {
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "num_predict": 1024,
-        },
+        "options": options,
     }
 
     async with httpx.AsyncClient(
         base_url=settings.OLLAMA_BASE_URL,
-        timeout=120.0,
+        timeout=180.0,
     ) as client:
         try:
             resp = await client.post("/api/chat", json=chat_payload)
@@ -69,21 +74,27 @@ async def generate_response(prompt: str, model: str | None = None) -> str:
             data = resp.json()
             return data.get("message", {}).get("content", "").strip()
         except Exception:
-            gen_payload = {
-                "model": model,
-                "system": _SYSTEM_PROMPT,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "top_p": 0.9,
-                    "num_predict": 1024,
-                },
-            }
-            resp = await client.post("/api/generate", json=gen_payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("response", "").strip()
+            # Fallback retry: force CPU execution if GPU ran out of memory
+            fallback_options = dict(options)
+            fallback_options["num_gpu"] = 0
+            chat_payload["options"] = fallback_options
+            try:
+                resp = await client.post("/api/chat", json=chat_payload)
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("message", {}).get("content", "").strip()
+            except Exception:
+                gen_payload = {
+                    "model": model,
+                    "system": _SYSTEM_PROMPT,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": fallback_options,
+                }
+                resp = await client.post("/api/generate", json=gen_payload)
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("response", "").strip()
 
 
 # ── Vision / Image analysis ───────────────────────────────────────────────────
