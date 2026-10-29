@@ -14,18 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first for caching layer
-COPY backend/requirements.txt requirements.txt
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire repository content into the container
+# Copy backend files into /app/
 COPY . /app/
-
-# Also copy backend files directly into /app root so uvicorn can load main:app seamlessly
-COPY backend/ /app/
-
-# Ensure app.js is accessible at both root and js/ folder paths
-RUN if [ -f /app/js/app.js ] && [ ! -f /app/app.js ]; then cp /app/js/app.js /app/app.js; \
-    elif [ -f /app/app.js ] && [ ! -f /app/js/app.js ]; then mkdir -p /app/js && cp /app/app.js /app/js/app.js; fi
 
 # Expose FastAPI port
 EXPOSE 8000

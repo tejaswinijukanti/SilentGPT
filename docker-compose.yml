@@ -2,8 +2,8 @@ services:
   # ── Backend: FastAPI Application ───────────────────────────────────────────
   backend:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: silentgpt-backend
     ports:
       - "8000:8000"
