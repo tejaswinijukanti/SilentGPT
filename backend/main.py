@@ -547,7 +547,9 @@ async def global_exception_handler(request, exc):
 
 
 # ── Serve Static Frontend Files ───────────────────────────────────────────────
-ROOT_DIR = Path(__file__).resolve().parent.parent
+_parent_root = Path(__file__).resolve().parent.parent
+_current_dir = Path(__file__).resolve().parent
+ROOT_DIR = _parent_root if (_parent_root / "index.html").exists() else _current_dir
 
 
 @app.get("/", include_in_schema=False)
