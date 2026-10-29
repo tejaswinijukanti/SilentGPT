@@ -23,7 +23,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import Settings, get_settings
@@ -546,8 +546,18 @@ async def global_exception_handler(request, exc):
     )
 
 
-# ── Serve Static Frontend Files (if present) ──────────────────────────────────
-FRONTEND_DIR = Path(__file__).resolve().parent.parent
-if (FRONTEND_DIR / "index.html").exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+# ── Serve Static Frontend Files ───────────────────────────────────────────────
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
+
+@app.get("/", include_in_schema=False)
+async def serve_root():
+    """Serve index.html at root."""
+    index_file = ROOT_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    raise HTTPException(status_code=404, detail="index.html not found")
+
+
+if ROOT_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(ROOT_DIR), html=True), name="static")
